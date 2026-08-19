@@ -41,6 +41,7 @@ import {
   type OpenworkControlAction,
 } from "./control/control-provider";
 import { OpenworkContextPublisher } from "./openwork-context-publisher";
+import { EngagementViewsPage } from "../domains/engagement/engagement-views-page";
 import { SessionRoute } from "./session-route";
 import { SettingsRoute } from "./settings-route";
 import { ShellConfigProvider } from "./shell-config";
@@ -474,6 +475,14 @@ export function AppRoot() {
                 element={
                   <DevProfiler id="SettingsRoute">
                     <SettingsRoute />
+                  </DevProfiler>
+                }
+              />
+              <Route
+                path="/engagement-views"
+                element={
+                  <DevProfiler id="EngagementViewsRoute">
+                    <EngagementViewsPage />
                   </DevProfiler>
                 }
               />
