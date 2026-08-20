@@ -916,6 +916,19 @@ export function createConnectionsStore(options: {
                 type: "local" as const,
                 command: (mcpEntryConfig["command"] as string[]) ?? entry.command!,
                 enabled: true,
+                // mcpEntryConfig["environment"] is set above (see
+                // resolveLocalMcpEnvironment) for entries like agent-fde that
+                // need a deterministic env var to resolve their workspace.
+                // It was already written into the project's opencode.json,
+                // but this hot-add call is what actually spawns the process
+                // on first connect -- omitting it here left MCP_LAUNCH_WORKSPACE
+                // unset for the live spawn, so agent-fde refused immediately
+                // with "Connection closed" even though the on-disk config
+                // was correct. Confirmed by reproducing both call shapes
+                // directly against a running opencode server.
+                ...(mcpEntryConfig["environment"]
+                  ? { environment: mcpEntryConfig["environment"] as Record<string, string> }
+                  : {}),
               };
 
         const status = unwrap(
