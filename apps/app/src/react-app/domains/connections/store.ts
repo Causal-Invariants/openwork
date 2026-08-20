@@ -406,13 +406,13 @@ export function createConnectionsStore(options: {
 
   const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo, workspaceDir?: string | null) => {
     if (entry.serverName === "agent-fde") {
-      // agent-fde mcp launch reads AGENT_FDE_MCP_WORKSPACE as its only
+      // agent-fde mcp launch reads MCP_LAUNCH_WORKSPACE as its only
       // workspace source (no cwd fallback — see the Agent-FDE
       // add-mcp-openwork-launcher change's design.md for why). Set it
       // here, deterministically, to the workspace root this connect call
       // is actually opening, rather than leaving agent-fde to infer
       // anything.
-      return workspaceDir ? { AGENT_FDE_MCP_WORKSPACE: workspaceDir } : undefined;
+      return workspaceDir ? { MCP_LAUNCH_WORKSPACE: workspaceDir } : undefined;
     }
     if (entry.serverName !== "openwork-ui") return undefined;
     try {
