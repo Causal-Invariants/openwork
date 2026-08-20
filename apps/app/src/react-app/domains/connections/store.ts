@@ -404,7 +404,16 @@ export function createConnectionsStore(options: {
     return entry.command;
   };
 
-  const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo) => {
+  const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo, workspaceDir?: string | null) => {
+    if (entry.serverName === "agent-fde") {
+      // agent-fde mcp launch reads AGENT_FDE_MCP_WORKSPACE as its only
+      // workspace source (no cwd fallback — see the Agent-FDE
+      // add-mcp-openwork-launcher change's design.md for why). Set it
+      // here, deterministically, to the workspace root this connect call
+      // is actually opening, rather than leaving agent-fde to infer
+      // anything.
+      return workspaceDir ? { AGENT_FDE_MCP_WORKSPACE: workspaceDir } : undefined;
+    }
     if (entry.serverName !== "openwork-ui") return undefined;
     try {
       const environment = await window.__OPENWORK_ELECTRON__?.invokeDesktop?.("getOpenworkUiMcpEnvironment");
@@ -830,7 +839,7 @@ export function createConnectionsStore(options: {
           throw new Error("Missing MCP command.");
         }
         mcpEntryConfig["command"] = await resolveLocalMcpCommand(entry);
-        const environment = await resolveLocalMcpEnvironment(entry);
+        const environment = await resolveLocalMcpEnvironment(entry, resolvedProjectDir);
         if (environment) {
           mcpEntryConfig["environment"] = environment;
         }
