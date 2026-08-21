@@ -298,7 +298,7 @@ export const BUILT_IN_OPENWORK_EXTENSION_MANIFESTS: OpenWorkExtensionManifest[] 
     id: "agent-fde",
     name: "Agent-FDE",
     description: "Local Agent-FDE MCP server, exposing the workspace's API surface as MCP tools over stdio.",
-    source: { format: "manual", origin: "local", trusted: true },
+    source: { format: "openwork-builtin", origin: "builtin", trusted: true },
     composer: { prompt: "Use Agent-FDE to " },
     setup: {
       instructions: "Agent-FDE must be installed and on PATH. OpenWork launches it as a local MCP server against the current workspace; no additional configuration is required.",
