@@ -404,6 +404,36 @@ export function createConnectionsStore(options: {
     return entry.command;
   };
 
+  // agent-fde refuses every tools/call for which no credential resolves a
+  // principal, and deliberately will not mint one for itself: a server that
+  // could grant itself authority has no authority boundary. So the token is
+  // provisioned out of band -- `agent-fde mcp issue-credential --workspace
+  // ... --stakeholder fde:stakeholder/<ULID>`, which prints it exactly once --
+  // and stored under this key in OpenWork's user env. We only carry it to the
+  // child; we never create one, and we never let a request name its own author.
+  //
+  // The store is user-level (apps/server/src/env-file.ts) while the credential
+  // is issued against one workspace. A token presented to a workspace it was
+  // not issued for does not resolve there and the call is refused, which is
+  // the safe direction to fail; but it does mean one provisioned workspace at
+  // a time until there is somewhere per-workspace to keep this.
+  const AGENT_FDE_SERVE_TOKEN_KEY = "MCP_SERVE_TOKEN";
+
+  const readAgentFdeServeToken = async (): Promise<string | null> => {
+    const openworkClient = getOpenworkSnapshot().openworkServerClient;
+    if (!openworkClient) return null;
+    try {
+      const response = await openworkClient.getUserEnv(AGENT_FDE_SERVE_TOKEN_KEY);
+      const value = response.item?.value?.trim();
+      return value ? value : null;
+    } catch {
+      // Unset is the ordinary case, not a fault: the connection still comes up
+      // and the eight view tools still list. Only calling them is refused, and
+      // that refusal is the designed posture rather than a misconfiguration.
+      return null;
+    }
+  };
+
   const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo, workspaceDir?: string | null) => {
     if (entry.serverName === "agent-fde") {
       // agent-fde mcp launch reads MCP_LAUNCH_WORKSPACE as its only
@@ -412,7 +442,11 @@ export function createConnectionsStore(options: {
       // here, deterministically, to the workspace root this connect call
       // is actually opening, rather than leaving agent-fde to infer
       // anything.
-      return workspaceDir ? { MCP_LAUNCH_WORKSPACE: workspaceDir } : undefined;
+      if (!workspaceDir) return undefined;
+      const environment: Record<string, string> = { MCP_LAUNCH_WORKSPACE: workspaceDir };
+      const serveToken = await readAgentFdeServeToken();
+      if (serveToken) environment[AGENT_FDE_SERVE_TOKEN_KEY] = serveToken;
+      return environment;
     }
     if (entry.serverName !== "openwork-ui") return undefined;
     try {
