@@ -8,7 +8,13 @@ import path from "node:path";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
-import { desktopBootstrapPath, openworkEnvStorePath, openworkServerConfigPath, resolveWorkspaceOpencodeConfigPath } from "@openwork/paths";
+import {
+  desktopBootstrapPath,
+  normalizeWorkspaceRootPath,
+  openworkEnvStorePath,
+  openworkServerConfigPath,
+  resolveWorkspaceOpencodeConfigPath,
+} from "@openwork/paths";
 import {
   dedupeCertificates,
   resolveSystemCaBundle,
@@ -144,26 +150,63 @@ function appendOutput(state, key, chunk) {
   state[key] = truncateOutput(next);
 }
 
-function normalizeWorkspaceKey(value) {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) return "";
-  return path.resolve(trimmed).replace(/\\/g, "/").toLowerCase();
+function normalizeWorkspaceKey(value, platform = process.platform) {
+  try {
+    const normalized = normalizeWorkspaceRootPath(value, { platform });
+    if (!normalized) return "";
+    const paths = platform === "win32" ? path.win32 : path;
+    return paths.resolve(normalized).replace(/\\/g, "/").toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
-export function prioritizeWorkspacePaths(preferredPath, workspacePaths = []) {
-  const preferred = String(preferredPath ?? "").trim();
+export function prioritizeWorkspacePaths(preferredPath, workspacePaths = [], options = {}) {
+  const platform = options.platform ?? process.platform;
   const paths = [];
   const seen = new Set();
   const add = (value) => {
-    const workspacePath = String(value ?? "").trim();
-    const key = normalizeWorkspaceKey(workspacePath);
+    let workspacePath;
+    try {
+      workspacePath = normalizeWorkspaceRootPath(value, { platform });
+    } catch {
+      return;
+    }
+    const key = normalizeWorkspaceKey(workspacePath, platform);
     if (!workspacePath || !key || seen.has(key)) return;
     paths.push(workspacePath);
     seen.add(key);
   };
-  add(preferred);
+  add(preferredPath);
   for (const workspacePath of workspacePaths) add(workspacePath);
   return paths;
+}
+
+function workspaceInaccessibleError(workspacePath, cause) {
+  if (cause && typeof cause === "object" && cause.code === "workspace_inaccessible") return cause;
+  const error = new Error(`Workspace path is not accessible: ${workspacePath}`, { cause });
+  Object.defineProperties(error, {
+    code: { value: "workspace_inaccessible", enumerable: true },
+    workspacePath: { value: workspacePath, enumerable: true },
+  });
+  return error;
+}
+
+export async function prepareRuntimeWorkspaceRoot(projectDir, options = {}) {
+  const rawProjectDir = String(projectDir ?? "").trim();
+  try {
+    const workspaceRoot = normalizeWorkspaceRootPath(rawProjectDir, {
+      platform: options.platform ?? process.platform,
+    });
+    if (!workspaceRoot) throw new Error("projectDir is required");
+    await (options.mkdirImpl ?? mkdir)(workspaceRoot, { recursive: true });
+    if (typeof options.ensureConfig === "function") {
+      await options.ensureConfig(workspaceRoot);
+    }
+    return workspaceRoot;
+  } catch (error) {
+    throw workspaceInaccessibleError(rawProjectDir, error);
+  }
 }
 
 export function resolveOpenworkServerConfigPath(env = process.env) {
@@ -1241,7 +1284,14 @@ export function mergeSystemCaChildEnv(baseEnv = {}, caEnv = {}, extra = {}) {
   };
 }
 
-export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths, localManagedMcpVaultKey }) {
+export function createRuntimeManager({
+  app,
+  desktopRoot,
+  listLocalWorkspacePaths,
+  localManagedMcpVaultKey,
+  workspaceMkdir = mkdir,
+  workspacePlatform = process.platform,
+}) {
   const inheritedProcessEnv = { ...process.env };
   let injectedUserEnvKeys = new Set();
   const engineState = createEngineState();
@@ -1324,7 +1374,7 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
 
   async function loadOrCreateWorkspaceTokens(workspaceKey) {
     const store = await loadTokenStore();
-    const normalized = normalizeWorkspaceKey(workspaceKey);
+    const normalized = normalizeWorkspaceKey(workspaceKey, workspacePlatform);
     if (store.workspaces?.[normalized]) {
       return store.workspaces[normalized];
     }
@@ -1342,7 +1392,7 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
 
   async function persistWorkspaceOwnerToken(workspaceKey, ownerToken) {
     const store = await loadTokenStore();
-    const normalized = normalizeWorkspaceKey(workspaceKey);
+    const normalized = normalizeWorkspaceKey(workspaceKey, workspacePlatform);
     if (!store.workspaces?.[normalized]) return;
     store.workspaces[normalized].ownerToken = ownerToken;
     store.workspaces[normalized].updatedAt = nowMs();
@@ -1351,7 +1401,7 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
 
   async function readPreferredOpenworkPort(workspaceKey) {
     const state = await loadPortState();
-    const normalized = normalizeWorkspaceKey(workspaceKey);
+    const normalized = normalizeWorkspaceKey(workspaceKey, workspacePlatform);
     if (normalized && state.workspacePorts?.[normalized]) {
       return state.workspacePorts[normalized];
     }
@@ -1360,7 +1410,7 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
 
   async function persistPreferredOpenworkPort(workspaceKey, port) {
     const state = await loadPortState();
-    const normalized = normalizeWorkspaceKey(workspaceKey);
+    const normalized = normalizeWorkspaceKey(workspaceKey, workspacePlatform);
     state.version = 4;
     state.workspacePorts ??= {};
     if (normalized) {
@@ -1810,7 +1860,9 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
     // the server config loader will ignore server.json and lose server-created
     // workspaces after restart.
     const serverConfigPath = resolveOpenworkServerConfigPath(process.env);
-    const requestedWorkspacePaths = (options.workspacePaths ?? []).filter((value) => value.trim().length > 0);
+    const requestedWorkspacePaths = prioritizeWorkspacePaths("", options.workspacePaths, {
+      platform: workspacePlatform,
+    });
     const workspacePaths = seedWorkspacePathsForEmbeddedServer(
       requestedWorkspacePaths,
       existsSync(serverConfigPath),
@@ -1944,6 +1996,16 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
     lifecycleState = "idle";
   }
 
+  function settleAfterWorkspacePreparationFailure() {
+    if (snapshotOpenworkServerState(openworkServerState).running) {
+      lifecycleState = "healthy";
+      return;
+    }
+    Object.assign(engineState, createEngineState());
+    Object.assign(openworkServerState, createOpenworkServerState());
+    lifecycleState = "idle";
+  }
+
   async function ensureOpenwork(options) {
     let openworkServer;
     try {
@@ -1966,9 +2028,16 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
   }
 
   async function engineStart(projectDir, options = {}) {
-    const safeProjectDir = String(projectDir ?? "").trim();
-    if (!safeProjectDir) {
+    const rawProjectDir = String(projectDir ?? "").trim();
+    if (!rawProjectDir) {
       throw new Error("projectDir is required");
+    }
+    let safeProjectDir;
+    try {
+      safeProjectDir = normalizeWorkspaceRootPath(rawProjectDir, { platform: workspacePlatform });
+    } catch (error) {
+      settleAfterWorkspacePreparationFailure();
+      throw workspaceInaccessibleError(rawProjectDir, error);
     }
 
     // Reuse a healthy server instead of tearing it down. During boot the
@@ -1987,7 +2056,7 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
       options.forceRestart !== true &&
       openworkServerState.inProcess &&
       lifecycleState === "healthy" &&
-      normalizeWorkspaceKey(engineState.projectDir) === normalizeWorkspaceKey(safeProjectDir) &&
+      normalizeWorkspaceKey(engineState.projectDir, workspacePlatform) === normalizeWorkspaceKey(safeProjectDir, workspacePlatform) &&
       openworkServerState.remoteAccessEnabled === requestedRemoteAccess &&
       openworkServerState.engineRollover === requestedEngineRollover
     ) {
@@ -1997,13 +2066,22 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
       }
     }
 
-    await mkdir(safeProjectDir, { recursive: true });
-    await ensureOpencodeConfig(safeProjectDir);
+    lifecycleState = "starting";
+    try {
+      safeProjectDir = await prepareRuntimeWorkspaceRoot(safeProjectDir, {
+        platform: workspacePlatform,
+        mkdirImpl: workspaceMkdir,
+        ensureConfig: ensureOpencodeConfig,
+      });
+    } catch (error) {
+      settleAfterWorkspacePreparationFailure();
+      throw error;
+    }
     await prepareFreshRuntime();
 
-    const workspacePaths = [safeProjectDir, ...((options.workspacePaths ?? []).filter(Boolean))].filter(
-      (value, index, list) => list.indexOf(value) === index,
-    );
+    const workspacePaths = prioritizeWorkspacePaths(safeProjectDir, options.workspacePaths, {
+      platform: workspacePlatform,
+    });
     const runtime = DIRECT_RUNTIME;
 
     try {
@@ -2078,7 +2156,9 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
   }
 
   async function openworkServerRestart(options = {}) {
-    const workspacePaths = prioritizeWorkspacePaths(engineState.projectDir, await listLocalWorkspacePaths());
+    const workspacePaths = prioritizeWorkspacePaths(engineState.projectDir, await listLocalWorkspacePaths(), {
+      platform: workspacePlatform,
+    });
     const shouldManageOpencode = Boolean(
       openworkServerState.managedOpencodeBinPath || engineState.opencodeBinPath || !engineState.baseUrl,
     );

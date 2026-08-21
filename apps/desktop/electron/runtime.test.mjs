@@ -7,7 +7,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   commandMatchesPackagedSidecar,
+  createRuntimeManager,
   embeddedServerImportUrl,
+  prepareRuntimeWorkspaceRoot,
   prioritizeWorkspacePaths,
   resetRuntimeStatesAfterFailedServerStart,
   resolveEngineRolloverPreference,
@@ -18,6 +20,64 @@ import {
   snapshotEngineState,
   snapshotOpenworkServerState,
 } from "./runtime.mjs";
+
+describe("workspace root preparation", () => {
+  it("reports an inaccessible Windows drive as a controlled recoverable error", async () => {
+    const mkdirError = Object.assign(new Error("drive is unavailable"), { code: "ENOENT" });
+    let attemptedPath = null;
+
+    await assert.rejects(
+      prepareRuntimeWorkspaceRoot("\\\\?\\Z:\\Disconnected\\Workspace", {
+        platform: "win32",
+        mkdirImpl: async (workspaceRoot) => {
+          attemptedPath = workspaceRoot;
+          throw mkdirError;
+        },
+      }),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.ok("code" in error);
+        assert.ok("workspacePath" in error);
+        assert.equal(error.code, "workspace_inaccessible");
+        assert.equal(error.workspacePath, "\\\\?\\Z:\\Disconnected\\Workspace");
+        assert.equal(error.cause, mkdirError);
+        return true;
+      },
+    );
+    assert.equal(attemptedPath, "Z:\\Disconnected\\Workspace");
+  });
+
+  it("returns the runtime lifecycle to idle after root preparation fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "openwork-runtime-root-"));
+    try {
+      const manager = createRuntimeManager({
+        app: {
+          getPath: (name) => name === "exe" ? path.join(root, "OpenWork.exe") : root,
+          isPackaged: false,
+        },
+        desktopRoot: path.dirname(fileURLToPath(import.meta.url)),
+        listLocalWorkspacePaths: async () => [],
+        localManagedMcpVaultKey: "test-key",
+        workspaceMkdir: async () => {
+          throw Object.assign(new Error("network share disconnected"), { code: "ENOENT" });
+        },
+        workspacePlatform: "win32",
+      });
+
+      await assert.rejects(
+        manager.engineStart("\\\\server\\share\\Workspace"),
+        (error) => error instanceof Error && "code" in error && error.code === "workspace_inaccessible",
+      );
+      const status = await manager.runtimeStatus();
+      assert.equal(status.lifecycleState, "idle");
+      assert.equal(status.engine.running, false);
+      assert.equal(status.engine.projectDir, null);
+      assert.equal(status.openworkServer.running, false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("bundled OpenCode runtime", () => {
   it("pins the engine release containing the timestamp-based session loop repair", async () => {

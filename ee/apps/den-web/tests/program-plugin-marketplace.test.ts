@@ -33,6 +33,9 @@ describe("Program Plugin and Marketplace presentation", () => {
   test("does not render an inaccessible parent Plugin for a directly shared Program", () => {
     expect(libraryData).toContain("plugin: LibraryNamedEntity | null");
     expect(libraryScreen).toContain("item.plugin ? `Plugin ${item.plugin.name} · ` : \"\"");
+    expect(libraryScreen).toContain("getLibraryPluginRoute(orgSlug, item.id)");
+    expect(libraryScreen).toContain("item.type === \"connection\"");
+    expect(libraryScreen).toContain("? connectionHref");
     expect(programDetail).toContain("detail.program.plugin ?");
     expect(pluginDetail).toContain('program.plugin ? `Currently in ${program.plugin.name}` : "Shared directly"');
   });

@@ -663,19 +663,9 @@ async function fetchResolvedPlugin(id: string): Promise<DenPlugin | null> {
         ? item.normalizedPayload.requiredCapabilities.length
         : 0,
     } satisfies PluginProgram));
-  const apps = membershipItems
-    .filter((item) => item.objectType === "app" && item.normalizedPayload?.kind === "remote_mcp_app")
-    .map((item) => {
-      const metadata = isRecord(item.normalizedPayload?.metadata) ? item.normalizedPayload.metadata : {};
-      const source = isRecord(item.normalizedPayload?.source) ? item.normalizedPayload.source : {};
-      return {
-        id: item.id,
-        name: asString(metadata.name) ?? item.title,
-        description: asString(metadata.description) ?? item.description,
-        version: asString(metadata.version),
-        sourceUrl: asString(source.url),
-      } satisfies PluginRemoteMcpApp;
-    });
+  // Standalone URL-imported Apps are retained in storage for a future unit of
+  // value, but intentionally stay out of the current Plugin and Library UI.
+  const apps: PluginRemoteMcpApp[] = [];
   const hooks = membershipItems
     .filter((item) => item.objectType === "hook")
     .map((item) => ({

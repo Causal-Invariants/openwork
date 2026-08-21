@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto"
-import { and, eq, isNull } from "@openwork-ee/den-db/drizzle"
-import { MemberTable, OAuthAccessTokenTable } from "@openwork-ee/den-db/schema"
+import { eq } from "@openwork-ee/den-db/drizzle"
+import { OAuthAccessTokenTable } from "@openwork-ee/den-db/schema"
 import { normalizeDenTypeId } from "@openwork-ee/utils/typeid"
 import { verifyJwsAccessToken } from "better-auth/oauth2"
 import {
@@ -14,6 +14,7 @@ import {
   DEN_MCP_RESOURCE_CLAIM,
   DEN_MCP_TOKEN_USE_CLAIM,
 } from "../auth.js"
+import { cache } from "../cache.js"
 import { db } from "../db.js"
 import { env } from "../env.js"
 import { publicRequestUrl } from "../request-url.js"
@@ -262,17 +263,7 @@ export async function hasActiveMcpMembership(input: { userId: string; organizati
     return false
   }
 
-  const rows = await db
-    .select({ id: MemberTable.id })
-    .from(MemberTable)
-    .where(and(
-      eq(MemberTable.userId, principal.userId),
-      eq(MemberTable.organizationId, principal.organizationId),
-      isNull(MemberTable.removedAt),
-    ))
-    .limit(1)
-
-  return rows.length > 0
+  return await cache.org.membership(principal) !== null
 }
 
 async function getJwks() {

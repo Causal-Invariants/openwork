@@ -210,6 +210,11 @@ export type CommandListItem = {
   name: string;
   description?: string;
   source?: "command" | "mcp" | "skill";
+  template?: string;
+  hints?: string[];
+  agent?: string;
+  model?: string;
+  subtask?: boolean;
 };
 
 /**
@@ -228,6 +233,13 @@ export async function listCommands(
       name: String(cmd.name ?? ""),
       description: cmd.description ? String(cmd.description) : undefined,
       source: cmd.source as CommandListItem["source"],
+      template: typeof cmd.template === "string" ? cmd.template : undefined,
+      hints: Array.isArray(cmd.hints)
+        ? cmd.hints.filter((hint): hint is string => typeof hint === "string")
+        : undefined,
+      agent: typeof cmd.agent === "string" ? cmd.agent : undefined,
+      model: typeof cmd.model === "string" ? cmd.model : undefined,
+      subtask: cmd.subtask === true,
     }));
   } catch {
     return [];

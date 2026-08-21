@@ -20,8 +20,9 @@ pnpm release:review         # sanity: placeholders intact, opencode pin present
 1. `release:cut` dispatches `Release App` (or run it from the Actions tab).
 2. The `resolve-release` job computes the next version from the highest stable
    `v*` tag (`scripts/release/versions.mjs`), creates the tag on `origin/dev`
-   HEAD, and pushes it. GITHUB_TOKEN tag pushes don't retrigger workflows, so
-   this run *is* the release run.
+   HEAD, and creates it via REST as the diff-warden app. The app's tag retriggers
+   the workflow, but that duplicate run is skipped by an actor guard — the
+   dispatch run *is* the release run.
 3. `verify-release` checks the tag (`scripts/release/verify-tag.mjs`): strict
    stable `vX.Y.Z` format, and fresh tags must be strictly greater than every
    other stable tag. `release:review --strict` guards that the committed
@@ -40,9 +41,12 @@ pnpm release:review         # sanity: placeholders intact, opencode pin present
 ## Prerequisites
 
 - `gh` authenticated with permission to dispatch workflows.
-- **One-time repo setting**: the `v*` tag ruleset must list **GitHub Actions**
-  as a bypass actor so `resolve-release` can push the tag it creates. Without
-  it the run fails at the tag push with instructions.
+- **One-time repo setting (done)**: the org-owned **diff-warden** GitHub App
+  is a bypass actor on the `v*` tag ruleset; `resolve-release` mints its
+  token (`WARDEN_APP_ID` + `WARDEN_PRIVATE_KEY` in the `warden-clearance`
+  environment) to create the tag ref via REST. The built-in GitHub Actions app cannot be a bypass actor —
+  GitHub rejects it. Without the app token the run falls back to
+  GITHUB_TOKEN and fails with instructions.
 - Manual tag pushes (expedited path below) additionally require repo/org
   admin, as before.
 
@@ -177,7 +181,7 @@ fallback snapshot only; refresh it occasionally with
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Run fails pushing the tag | GitHub Actions not on the `v*` ruleset bypass list | add it (Settings → Rules), or push the tag manually and rerun |
+| Run fails pushing the tag | diff-warden app missing from the `v*` ruleset bypass list, or its secrets unset | re-add the app (Settings → Rules) / restore `WARDEN_APP_ID`+`WARDEN_PRIVATE_KEY`, or push the tag manually as an admin and rerun |
 | `Tag vX.Y.Z already exists` on a fresh cut | version already released | rerun with `-f tag=vX.Y.Z` (recovery) or pick a higher version |
 | `verify-release` fails monotonicity | manual tag lower than an existing release | choose a version above the current highest stable tag |
 | `release:review` fails placeholder check | someone committed a real version into package.json | restore `0.0.0-dev` — CI stamps versions from the tag |

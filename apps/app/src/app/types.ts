@@ -346,6 +346,8 @@ export type McpServerEntry = {
   marketplaceName?: string;
   pluginName?: string;
   connectCapabilityName?: string;
+  /** Den organization connection this MCP is backed by, when sign-in is member-owned. */
+  orgMcpConnectionId?: string;
   managedOAuth?: ManagedMcpOAuthConnection | null;
 };
 

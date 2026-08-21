@@ -9,6 +9,7 @@ export default defineConfig({
     "openwork-provider": "src/openwork-provider.ts",
     "automations": "src/automations.ts",
     "dynamic-artifacts": "src/dynamic-artifacts.ts",
+    "skill-created-app": "src/skill-created-app.ts",
     "den/desktop-app-restrictions": "src/den/desktop-app-restrictions.ts",
     "den/desktop-policies": "src/den/desktop-policies.ts",
     "den/connect-diagnostics": "src/den/connect-diagnostics.ts",

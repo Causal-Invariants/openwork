@@ -45,7 +45,7 @@ function startMockOpencode(options?: {
   failMcpNames?: string[];
   mcpStatusByName?: Record<string, unknown>;
   liveMcpStatusByName?: () => Record<string, unknown>;
-  mcpResponseForName?: (name: string) => Response | null;
+  mcpResponseForName?: (name: string) => Response | Promise<Response> | null;
   disposeResponse?: () => Response | null;
 }) {
   const requests: EngineRequest[] = [];
@@ -67,7 +67,7 @@ function startMockOpencode(options?: {
         }
         if (!name) return Response.json({});
         const customResponse = options?.mcpResponseForName?.(name);
-        if (customResponse) return customResponse;
+        if (customResponse) return await customResponse;
         const status = Object.hasOwn(options?.mcpStatusByName ?? {}, name)
           ? options?.mcpStatusByName?.[name]
           : "connected";
@@ -380,6 +380,150 @@ describe("runtime MCP engine sync", () => {
       else process.env.OPENWORK_RUNTIME_DB = previousDb;
       if (previousDeferredDelay === undefined) delete process.env.OPENWORK_MCP_SYNC_DEFERRED_DELAY_MS;
       else process.env.OPENWORK_MCP_SYNC_DEFERRED_DELAY_MS = previousDeferredDelay;
+    }
+  });
+
+  test("serializes workspace MCP sync and coalesces concurrent requests into one latest-state trailing pass", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const previousDb = process.env.OPENWORK_RUNTIME_DB;
+    process.env.OPENWORK_RUNTIME_DB = join(workspaceRoot, "runtime.sqlite");
+    let releaseFirstRegistration: (response: Response) => void = () => undefined;
+    const firstRegistrationReleased = new Promise<Response>((resolve) => {
+      releaseFirstRegistration = resolve;
+    });
+    let markFirstRegistrationReached: () => void = () => undefined;
+    const firstRegistrationReached = new Promise<void>((resolve) => {
+      markFirstRegistrationReached = resolve;
+    });
+    let registrations = 0;
+    let registrationsInFlight = 0;
+    let maxRegistrationsInFlight = 0;
+    try {
+      const mock = startMockOpencode({
+        mcpResponseForName: (name) => {
+          if (name !== "posthog") return null;
+          registrations += 1;
+          registrationsInFlight += 1;
+          maxRegistrationsInFlight = Math.max(maxRegistrationsInFlight, registrationsInFlight);
+          if (registrations === 1) {
+            markFirstRegistrationReached();
+            return firstRegistrationReleased.finally(() => {
+              registrationsInFlight -= 1;
+            });
+          }
+          registrationsInFlight -= 1;
+          return Response.json({ posthog: { status: "connected" } });
+        },
+      });
+      const openwork = await startOpenworkServer(workspaceRoot, `http://127.0.0.1:${mock.server.port}`);
+      const writePosthogUrl = (url: string) => writeRuntimeOpencodeConfig(openwork.config, "ws_1", (current) => ({
+        ...current,
+        mcp: { posthog: { ...POSTHOG_CONFIG, url } },
+      }));
+
+      await writePosthogUrl("https://first.example/mcp");
+      const firstSync = syncAllWorkspacesRuntimeMcpToEngine(openwork.config);
+      await firstRegistrationReached;
+
+      await writePosthogUrl("https://intermediate.example/mcp");
+      const secondSync = syncAllWorkspacesRuntimeMcpToEngine(openwork.config);
+      await writePosthogUrl("https://latest.example/mcp");
+      const thirdSync = syncAllWorkspacesRuntimeMcpToEngine(openwork.config);
+
+      await Bun.sleep(25);
+      expect(registrations).toBe(1);
+      expect(maxRegistrationsInFlight).toBe(1);
+
+      releaseFirstRegistration(Response.json({ posthog: { status: "connected" } }));
+      await Promise.all([firstSync, secondSync, thirdSync]);
+
+      const postedUrls = mock.requests
+        .filter((entry) => entry.method === "POST" && entry.pathname === "/mcp")
+        .map((entry) => {
+          const body = requireRecord(entry.body, "MCP registration body");
+          const config = requireRecord(body.config, "MCP registration config");
+          return config.url;
+        });
+      expect(postedUrls).toEqual(["https://first.example/mcp", "https://latest.example/mcp"]);
+      expect(registrations).toBe(2);
+      expect(maxRegistrationsInFlight).toBe(1);
+    } finally {
+      releaseFirstRegistration(Response.json({ posthog: { status: "connected" } }));
+      if (previousDb === undefined) delete process.env.OPENWORK_RUNTIME_DB;
+      else process.env.OPENWORK_RUNTIME_DB = previousDb;
+    }
+  });
+
+  test("does not overlap startup registration with explicit cloud reconciliation", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const previousDb = process.env.OPENWORK_RUNTIME_DB;
+    process.env.OPENWORK_RUNTIME_DB = join(workspaceRoot, "runtime.sqlite");
+    let releaseStartupRegistration: (response: Response) => void = () => undefined;
+    const startupRegistrationReleased = new Promise<Response>((resolve) => {
+      releaseStartupRegistration = resolve;
+    });
+    let markStartupRegistrationReached: () => void = () => undefined;
+    const startupRegistrationReached = new Promise<void>((resolve) => {
+      markStartupRegistrationReached = resolve;
+    });
+    const registrationNames: string[] = [];
+    let registrationsInFlight = 0;
+    let maxRegistrationsInFlight = 0;
+    try {
+      const mock = startMockOpencode({
+        liveMcpStatusByName: () => ({ "openwork-cloud": { status: "connected" } }),
+        mcpResponseForName: (name) => {
+          registrationNames.push(name);
+          registrationsInFlight += 1;
+          maxRegistrationsInFlight = Math.max(maxRegistrationsInFlight, registrationsInFlight);
+          if (name === "posthog" && registrationNames.length === 1) {
+            markStartupRegistrationReached();
+            return startupRegistrationReleased.finally(() => {
+              registrationsInFlight -= 1;
+            });
+          }
+          registrationsInFlight -= 1;
+          return Response.json({ [name]: { status: "connected" } });
+        },
+      });
+      const openwork = await startOpenworkServer(workspaceRoot, `http://127.0.0.1:${mock.server.port}`);
+      await writeRuntimeOpencodeConfig(openwork.config, "ws_1", (current) => ({
+        ...current,
+        mcp: { posthog: POSTHOG_CONFIG },
+      }));
+
+      const startupSync = syncAllWorkspacesRuntimeMcpToEngine(openwork.config);
+      await startupRegistrationReached;
+      const explicitReconcile = fetch(`${openwork.base}/workspace/ws_1/mcp/openwork-cloud/reconcile`, {
+        method: "POST",
+        headers: auth(openwork.token),
+        body: JSON.stringify({
+          config: {
+            type: "remote",
+            url: `http://127.0.0.1:${mock.server.port}/api/den/mcp/agent`,
+            enabled: true,
+            headers: { Authorization: "Bearer test-token" },
+            oauth: false,
+          },
+          trigger: "test",
+        }),
+      });
+
+      await Bun.sleep(25);
+      expect(registrationNames).toEqual(["posthog"]);
+      expect(maxRegistrationsInFlight).toBe(1);
+
+      releaseStartupRegistration(Response.json({ posthog: { status: "connected" } }));
+      const [, reconcileResponse] = await Promise.all([startupSync, explicitReconcile]);
+      expect(reconcileResponse.status).toBe(200);
+      await reconcileResponse.text();
+      expect(registrationNames.filter((name) => name === "posthog")).toHaveLength(1);
+      expect(registrationNames.filter((name) => name === "openwork-cloud").length).toBeGreaterThanOrEqual(1);
+      expect(maxRegistrationsInFlight).toBe(1);
+    } finally {
+      releaseStartupRegistration(Response.json({ posthog: { status: "connected" } }));
+      if (previousDb === undefined) delete process.env.OPENWORK_RUNTIME_DB;
+      else process.env.OPENWORK_RUNTIME_DB = previousDb;
     }
   });
 

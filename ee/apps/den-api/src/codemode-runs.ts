@@ -36,6 +36,29 @@ export function codemodeCodeDigest(code: string): string {
   return `sha256:${createHash("sha256").update(code).digest("hex")}`
 }
 
+export function parseCodemodeToolCalls(value: unknown): Array<{ name: string }> {
+  let decoded = value
+  if (typeof decoded === "string") {
+    try {
+      decoded = JSON.parse(decoded)
+    } catch {
+      throw new Error("codemode_run_tool_calls_invalid")
+    }
+  }
+  if (decoded === null || decoded === undefined) return []
+  if (!Array.isArray(decoded)) throw new Error("codemode_run_tool_calls_invalid")
+  return decoded.map((call) => {
+    if (typeof call !== "object" || call === null || Array.isArray(call)) {
+      throw new Error("codemode_run_tool_calls_invalid")
+    }
+    const name = Reflect.get(call, "name")
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error("codemode_run_tool_calls_invalid")
+    }
+    return { name }
+  })
+}
+
 export async function recordCodemodeRun(database: CodemodeDb, input: RecordCodemodeRunInput): Promise<DenTypeId<"codemodeRun"> | null> {
   const id = createDenTypeId("codemodeRun")
   try {
@@ -101,7 +124,7 @@ export async function listCodemodeRuns(database: CodemodeDb, input: {
   limit?: number
 }) {
   const limit = Math.min(200, Math.max(1, input.limit ?? 50))
-  return database
+  const rows = await database
     .select()
     .from(CodemodeRunTable)
     .where(input.orgMembershipId
@@ -112,4 +135,5 @@ export async function listCodemodeRuns(database: CodemodeDb, input: {
       : eq(CodemodeRunTable.organization_id, input.organizationId))
     .orderBy(desc(CodemodeRunTable.created_at))
     .limit(limit)
+  return rows.map((row) => ({ ...row, tool_calls: parseCodemodeToolCalls(row.tool_calls) }))
 }

@@ -390,7 +390,7 @@ export function registerPluginArchRoutes<T extends { Variables: OrgRouteVariable
     async (c: OrgContext) => {
       try {
         const context = actorContext(c)
-        await requirePluginArchCapability(context, "config_object.create")
+        await requirePluginArchCapability(context, "config_object.create", false)
         const body = validJson<any>(c)
         const item = await createConfigObject({
           context,
@@ -723,13 +723,13 @@ export function registerPluginArchRoutes<T extends { Variables: OrgRouteVariable
     async (c: OrgContext) => {
       try {
         const context = actorContext(c)
-        await requirePluginArchCapability(context, "plugin.create")
         const body = validJson<PluginCreateBody>(c)
+        await requirePluginArchCapability(context, "plugin.create", body.orgWide === true || Boolean(body.marketplaceId))
         if (body.orgWide === true && !isPluginArchOrgAdmin(context)) {
           throw new PluginArchAuthorizationError(403, "forbidden", "Only organization owners and admins can create org-wide plugins.")
         }
         if ((body.components?.length ?? 0) > 0) {
-          await requirePluginArchCapability(context, "config_object.create")
+          await requirePluginArchCapability(context, "config_object.create", false)
         }
         return c.json({
           ok: true,

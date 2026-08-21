@@ -17,6 +17,17 @@ function normalizeIdentifier(value) {
   return trimmed || null;
 }
 
+export function resolveOpenworkSentryAppVersion({ app, packageMetadata }) {
+  const electronAppVersion = normalizeIdentifier(app?.getVersion?.());
+  const packageVersion = normalizeIdentifier(packageMetadata?.version);
+  if (app?.isPackaged) return electronAppVersion || packageVersion || "unknown";
+  return packageVersion || electronAppVersion || "unknown";
+}
+
+export function resolveOpenworkSentryRelease({ appVersion, environmentRelease = process.env.SENTRY_RELEASE }) {
+  return normalizeIdentifier(environmentRelease) || `openwork-desktop@${normalizeIdentifier(appVersion) || "unknown"}`;
+}
+
 function parseBuildConfig(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
@@ -46,7 +57,8 @@ export async function initOpenworkSentry({ app, distribution, packageMetadata })
   if (!dsn || envFlagEnabled("OPENWORK_DESKTOP_SENTRY_DISABLED")) return false;
 
   sentry = await import("@sentry/electron/main");
-  const release = process.env.SENTRY_RELEASE?.trim() || `openwork-desktop@${app.getVersion?.() ?? packageMetadata.version}`;
+  const appVersion = resolveOpenworkSentryAppVersion({ app, packageMetadata });
+  const release = resolveOpenworkSentryRelease({ appVersion });
   const sampleRate = buildConfig.tracesSampleRate;
 
   sentry.init({
@@ -63,8 +75,16 @@ export async function initOpenworkSentry({ app, distribution, packageMetadata })
     initialScope: {
       tags: {
         app: "desktop",
+        app_version: appVersion,
         distribution: distribution.flavor,
         packaged: String(app.isPackaged),
+      },
+      contexts: {
+        app: {
+          app_identifier: distribution.appIdentifier,
+          app_name: distribution.appName,
+          app_version: appVersion,
+        },
       },
     },
   });

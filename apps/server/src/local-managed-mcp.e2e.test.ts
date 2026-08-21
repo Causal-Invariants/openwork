@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { EnterpriseMcpClientError } from "@openwork/enterprise-mcp-client";
 
 import { ApiError } from "./errors.js";
 import {
@@ -95,6 +96,119 @@ async function startOAuthProvider(port: number): Promise<string> {
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitFor(async () => (await fetch(`${baseUrl}/health`)).ok ? baseUrl : null, "OAuth MCP mock");
   return baseUrl;
+}
+
+type HandshakeFailure = "oauth-client-registration" | "mcp-initialize" | "unexpected-sdk-failure";
+
+function startHandshakeFailureProvider(failure: HandshakeFailure): string {
+  const nestedSecret = `${failure}-nested-secret`;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      const origin = url.origin;
+      if (url.pathname === "/.well-known/oauth-protected-resource"
+        || url.pathname === "/.well-known/oauth-protected-resource/mcp"
+        || url.pathname === "/mcp/.well-known/oauth-protected-resource") {
+        return Response.json({
+          resource: `${origin}/mcp`,
+          authorization_servers: [origin],
+          scopes_supported: ["mcp:read"],
+        });
+      }
+      if (url.pathname === "/.well-known/oauth-authorization-server"
+        || url.pathname === "/.well-known/oauth-authorization-server/mcp") {
+        return Response.json({
+          issuer: origin,
+          authorization_endpoint: `${origin}/authorize`,
+          token_endpoint: `${origin}/token`,
+          registration_endpoint: `${origin}/register`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          token_endpoint_auth_methods_supported: ["none"],
+          code_challenge_methods_supported: ["S256"],
+          scopes_supported: ["mcp:read"],
+        });
+      }
+      if (url.pathname === "/register" && request.method === "POST") {
+        if (failure === "oauth-client-registration") {
+          return Response.json({
+            error: "invalid_client_metadata",
+            error_description: nestedSecret,
+            client_secret: nestedSecret,
+          }, { status: 400 });
+        }
+        if (failure === "unexpected-sdk-failure") {
+          return Response.json({ client_id: 42 }, { status: 201 });
+        }
+        const body: unknown = await request.json();
+        const redirectUris = typeof body === "object" && body !== null && "redirect_uris" in body
+          && Array.isArray(body.redirect_uris)
+          ? body.redirect_uris.filter((value): value is string => typeof value === "string")
+          : [];
+        return Response.json({
+          client_id: "handshake-witness-client",
+          client_id_issued_at: Math.floor(Date.now() / 1_000),
+          token_endpoint_auth_method: "none",
+          redirect_uris: redirectUris,
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          scope: "mcp:read",
+        }, { status: 201 });
+      }
+      if (url.pathname === "/authorize" && request.method === "GET") {
+        const callback = new URL(url.searchParams.get("redirect_uri") ?? "");
+        callback.searchParams.set("code", "handshake-witness-code");
+        callback.searchParams.set("state", url.searchParams.get("state") ?? "");
+        return new Response(null, { status: 302, headers: { location: callback.toString() } });
+      }
+      if (url.pathname === "/token" && request.method === "POST") {
+        return Response.json({
+          access_token: "handshake-witness-access-token",
+          refresh_token: "handshake-witness-refresh-token",
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "mcp:read",
+        });
+      }
+      if (url.pathname === "/mcp") {
+        if (request.headers.get("authorization") !== "Bearer handshake-witness-access-token") {
+          return Response.json({ error: "missing_token" }, {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"` },
+          });
+        }
+        const body: unknown = await request.json().catch(() => null);
+        const method = typeof body === "object" && body !== null && "method" in body ? body.method : null;
+        const id = typeof body === "object" && body !== null && "id" in body ? body.id : null;
+        if (method === "initialize") {
+          if (failure === "mcp-initialize") {
+            return Response.json({
+              error: "provider_initialize_failed",
+              cause: { client_secret: nestedSecret },
+            }, { status: 503 });
+          }
+          return Response.json({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              protocolVersion: "2025-06-18",
+              capabilities: { tools: {} },
+              serverInfo: { name: "handshake-witness", version: "1.0.0" },
+            },
+          });
+        }
+        if (method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (method === "tools/list") {
+          return Response.json({ jsonrpc: "2.0", id, result: { tools: [] } });
+        }
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    },
+  });
+  stops.push(() => server.stop());
+  return `http://127.0.0.1:${server.port}`;
 }
 
 function createConfig(input: {
@@ -194,6 +308,7 @@ describe("OpenWork-managed local MCP OAuth gateway", () => {
       expect(created.status).toBe(502);
       expect(await created.json()).toMatchObject({
         code: "managed_mcp_connection_failed",
+        message: "OpenWork could not connect to this MCP server. Check its OAuth settings and availability, then try again.",
       });
 
       const status = await fetch(
@@ -207,6 +322,198 @@ describe("OpenWork-managed local MCP OAuth gateway", () => {
       else process.env.OPENWORK_RUNTIME_DB = previousRuntimeDb;
       if (previousDevMode === undefined) delete process.env.OPENWORK_DEV_MODE;
       else process.env.OPENWORK_DEV_MODE = previousDevMode;
+    }
+  });
+
+  test("returns safe connection errors for DCR reconnect and callback initialize failures", async () => {
+    const previousRuntimeDb = process.env.OPENWORK_RUNTIME_DB;
+    const previousDevMode = process.env.OPENWORK_DEV_MODE;
+    const previousTelemetry = globalThis.__openworkDesktopTelemetry;
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "openwork-local-managed-mcp-handshake-errors-"));
+    roots.push(workspaceRoot);
+    process.env.OPENWORK_RUNTIME_DB = join(workspaceRoot, "runtime.sqlite");
+    process.env.OPENWORK_DEV_MODE = "1";
+    const captured: unknown[] = [];
+    globalThis.__openworkDesktopTelemetry = {
+      captureException: (error) => {
+        captured.push(error);
+        return true;
+      },
+    };
+
+    try {
+      const engine = startMockOpencode();
+      const config = createConfig({
+        port: await freePort(),
+        workspaceRoot,
+        engineBaseUrl: `http://127.0.0.1:${engine.server.port}`,
+        vaultKey: randomBytes(32),
+      });
+      const server = await startServer(config);
+      stops.push(() => server.stop());
+      const openworkBaseUrl = `http://127.0.0.1:${server.port}`;
+      const expectedMessage = "OpenWork could not connect to this MCP server. Check its OAuth settings and availability, then try again.";
+
+      const registrationProvider = startHandshakeFailureProvider("oauth-client-registration");
+      await createLocalManagedMcpConnection(config, {
+        workspaceId: "ws_managed",
+        name: "registration-failure",
+        serverUrl: `${registrationProvider}/mcp`,
+        oauth: { applicationType: "native", requestedScopes: ["mcp:read"] },
+      });
+      const reconnect = await fetch(
+        `${openworkBaseUrl}/workspace/ws_managed/mcp/registration-failure/managed/connect`,
+        { method: "POST", headers: clientHeaders(config.token) },
+      );
+      expect(reconnect.status).toBe(502);
+      const reconnectBody = await reconnect.json();
+      expect(reconnectBody).toEqual({
+        code: "managed_mcp_connection_failed",
+        message: expectedMessage,
+      });
+      expect(JSON.stringify(reconnectBody)).not.toContain("oauth-client-registration-nested-secret");
+      const reconnectStatus = await fetch(
+        `${openworkBaseUrl}/workspace/ws_managed/mcp/registration-failure/managed`,
+        { headers: clientHeaders(config.token) },
+      );
+      expect(await reconnectStatus.json()).toMatchObject({
+        status: "reconnect_required",
+        lastError: expectedMessage,
+        hasCredential: false,
+      });
+
+      const initializeProvider = startHandshakeFailureProvider("mcp-initialize");
+      await createLocalManagedMcpConnection(config, {
+        workspaceId: "ws_managed",
+        name: "initialize-failure",
+        serverUrl: `${initializeProvider}/mcp`,
+        oauth: { applicationType: "native", requestedScopes: ["mcp:read"] },
+      });
+      const started = await fetch(
+        `${openworkBaseUrl}/workspace/ws_managed/mcp/initialize-failure/managed/connect`,
+        { method: "POST", headers: clientHeaders(config.token) },
+      );
+      expect(started.status).toBe(200);
+      const startedBody: unknown = await started.json();
+      if (typeof startedBody !== "object" || startedBody === null
+        || !("authorizeUrl" in startedBody) || typeof startedBody.authorizeUrl !== "string") {
+        throw new Error("Expected an OAuth authorization URL.");
+      }
+      expect(startedBody).toMatchObject({ status: "needs_auth" });
+      const authorization = await fetch(startedBody.authorizeUrl, { redirect: "manual" });
+      expect(authorization.status).toBe(302);
+      const callback = await fetch(authorization.headers.get("location")!);
+      expect(callback.status).toBe(502);
+      const callbackBody = await callback.json();
+      expect(callbackBody).toEqual({
+        code: "managed_mcp_connection_failed",
+        message: expectedMessage,
+      });
+      expect(JSON.stringify(callbackBody)).not.toContain("mcp-initialize-nested-secret");
+      const callbackStatus = await fetch(
+        `${openworkBaseUrl}/workspace/ws_managed/mcp/initialize-failure/managed`,
+        { headers: clientHeaders(config.token) },
+      );
+      expect(await callbackStatus.json()).toMatchObject({
+        status: "reconnect_required",
+        lastError: expectedMessage,
+        hasCredential: false,
+      });
+      expect(captured).toEqual([]);
+
+      const internalProvider = startHandshakeFailureProvider("unexpected-sdk-failure");
+      await createLocalManagedMcpConnection(config, {
+        workspaceId: "ws_managed",
+        name: "unexpected-sdk-failure",
+        serverUrl: `${internalProvider}/mcp`,
+        oauth: { applicationType: "native", requestedScopes: ["mcp:read"] },
+      });
+      const internalFailure = await fetch(
+        `${openworkBaseUrl}/workspace/ws_managed/mcp/unexpected-sdk-failure/managed/connect`,
+        { method: "POST", headers: clientHeaders(config.token) },
+      );
+      expect(internalFailure.status).toBe(500);
+      expect(await internalFailure.json()).toEqual({
+        code: "internal_error",
+        message: "Unexpected server error",
+      });
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toBeInstanceOf(EnterpriseMcpClientError);
+      expect(captured[0]).not.toBeInstanceOf(ApiError);
+      expect(captured[0]).toMatchObject({
+        code: "MCP_CONNECTION_HANDSHAKE_FAILED",
+        requestPhase: "mcp-initialize",
+      });
+    } finally {
+      globalThis.__openworkDesktopTelemetry = previousTelemetry;
+      if (previousRuntimeDb === undefined) delete process.env.OPENWORK_RUNTIME_DB;
+      else process.env.OPENWORK_RUNTIME_DB = previousRuntimeDb;
+      if (previousDevMode === undefined) delete process.env.OPENWORK_DEV_MODE;
+      else process.env.OPENWORK_DEV_MODE = previousDevMode;
+    }
+  }, 30_000);
+
+  test("returns actionable input errors without persisting managed connections", async () => {
+    const previousRuntimeDb = process.env.OPENWORK_RUNTIME_DB;
+    const previousDevMode = process.env.OPENWORK_DEV_MODE;
+    const previousAllowPrivateUrls = process.env.OPENWORK_ALLOW_PRIVATE_MCP_URLS;
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "openwork-local-managed-mcp-input-errors-"));
+    roots.push(workspaceRoot);
+    process.env.OPENWORK_RUNTIME_DB = join(workspaceRoot, "runtime.sqlite");
+    delete process.env.OPENWORK_DEV_MODE;
+    delete process.env.OPENWORK_ALLOW_PRIVATE_MCP_URLS;
+
+    try {
+      const engine = startMockOpencode();
+      const config = createConfig({
+        port: await freePort(),
+        workspaceRoot,
+        engineBaseUrl: `http://127.0.0.1:${engine.server.port}`,
+        vaultKey: randomBytes(32),
+      });
+      const server = await startServer(config);
+      stops.push(() => server.stop());
+      const openworkBaseUrl = `http://127.0.0.1:${server.port}`;
+      const cases = [
+        { name: "malformed-url", url: "not-a-url", code: "managed_mcp_url_invalid", message: "not-a-url" },
+        { name: "http-url", url: "http://example.com/mcp", code: "managed_mcp_url_not_allowed", message: "HTTPS" },
+        {
+          name: "unresolved-url",
+          url: "https://managed-mcp-does-not-resolve.invalid/mcp",
+          code: "managed_mcp_url_not_allowed",
+          message: "resolve",
+        },
+      ];
+
+      for (const input of cases) {
+        const created = await fetch(`${openworkBaseUrl}/workspace/ws_managed/mcp/managed`, {
+          method: "POST",
+          headers: clientHeaders(config.token),
+          body: JSON.stringify({ name: input.name, url: input.url, oauth: { applicationType: "native" } }),
+        });
+        expect(created.status).toBe(400);
+        expect(await created.json()).toMatchObject({
+          code: input.code,
+          message: expect.stringContaining(input.message),
+        });
+
+        const list = await fetch(`${openworkBaseUrl}/workspace/ws_managed/mcp`, {
+          headers: clientHeaders(config.token),
+        });
+        expect(list.status).toBe(200);
+        expect(JSON.stringify(await list.json())).not.toContain(`"name":"${input.name}"`);
+        const status = await fetch(`${openworkBaseUrl}/workspace/ws_managed/mcp/${input.name}/managed`, {
+          headers: clientHeaders(config.token),
+        });
+        expect(status.status).toBe(404);
+      }
+    } finally {
+      if (previousRuntimeDb === undefined) delete process.env.OPENWORK_RUNTIME_DB;
+      else process.env.OPENWORK_RUNTIME_DB = previousRuntimeDb;
+      if (previousDevMode === undefined) delete process.env.OPENWORK_DEV_MODE;
+      else process.env.OPENWORK_DEV_MODE = previousDevMode;
+      if (previousAllowPrivateUrls === undefined) delete process.env.OPENWORK_ALLOW_PRIVATE_MCP_URLS;
+      else process.env.OPENWORK_ALLOW_PRIVATE_MCP_URLS = previousAllowPrivateUrls;
     }
   });
 

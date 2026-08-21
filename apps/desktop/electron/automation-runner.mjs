@@ -1,4 +1,5 @@
 const EMPTY_USAGE = { inputTokens: null, outputTokens: null, costMicros: null }
+const RUNNER_WORK_POLL_MS = 60_000
 
 function serializedError(value) {
   if (value instanceof Error) return value.message
@@ -28,7 +29,10 @@ export function classifyAutomationExecutionError(error) {
 
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort)
+      resolve()
+    }, ms)
     const abort = () => {
       clearTimeout(timer)
       reject(signal.reason instanceof Error ? signal.reason : new Error("Automation run cancelled"))
@@ -178,10 +182,13 @@ function runnerTokenBinding(token) {
     const [payload, signature, extra] = String(token).split(".")
     if (!payload || !signature || extra) return null
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))
-    if (decoded?.v === 1) return { version: 1, audience: null }
+    const scope = [decoded?.o, decoded?.m, decoded?.r].every((value) => typeof value === "string")
+      ? `${decoded.o}\n${decoded.m}\n${decoded.r}`
+      : null
+    if (decoded?.v === 1) return { version: 1, audience: null, scope }
     if (decoded?.v !== 2 || typeof decoded.a !== "string") return null
     const audience = normalizeRunnerBaseUrl(decoded.a)
-    return audience ? { version: 2, audience } : null
+    return audience ? { version: 2, audience, scope } : null
   } catch {
     return null
   }
@@ -193,45 +200,98 @@ export function runnerTokenAudience(token) {
 
 export function createDesktopAutomationRunner(options) {
   const fetchImpl = options.fetchImpl ?? fetch
+  const random = options.random ?? Math.random
+  const waitBeforeReconnect = options.waitBeforeReconnect ?? sleep
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000
   const legacyBaseUrls = new Set((options.legacyBaseUrls ?? [])
     .map((value) => normalizeRunnerBaseUrl(value))
     .filter(Boolean))
-  let configuration = null
-  let connectionController = null
   let generation = 0
-  let lastEventId = 0
-  let reconcilePromise = null
-  let active = null
+  let current = null
+  let pendingConfiguration = null
   let stopped = false
+  const rejectedCredentials = new Set()
 
-  const runnerRequest = (requestPath, request = {}) => requestJson(
-    fetchImpl,
-    configuration.baseUrl,
-    configuration.token,
-    requestPath,
-    request,
-  )
+  const credentialKey = (configuration) => `${configuration.baseUrl}\n${configuration.token}`
+  const isCurrent = (state) => !stopped
+    && current === state
+    && current.generation === state.generation
+    && !state.retired
+  const retire = (state, reason) => {
+    if (state.retired) return
+    state.retired = true
+    state.controller.abort(reason)
+    state.active?.controller.abort(reason)
+    if (current === state) current = null
+  }
 
-  const heartbeat = async () => {
-    if (!active) return
+  const rejectCredential = (state, status) => {
+    if (state.credentialRejected) return
+    state.credentialRejected = true
+    const key = credentialKey(state.configuration)
+    rejectedCredentials.add(key)
+    const affectedCurrent = current === state || (current && credentialKey(current.configuration) === key)
+      ? current
+      : null
+    retire(state, new Error(`Automation runner credential rejected with HTTP ${status}`))
+    if (affectedCurrent && affectedCurrent !== state) {
+      affectedCurrent.credentialRejected = true
+      retire(affectedCurrent, new Error(`Automation runner credential rejected with HTTP ${status}`))
+    }
+    if (pendingConfiguration && credentialKey(pendingConfiguration) === key) pendingConfiguration = null
+    options.log?.(`runner credential rejected with HTTP ${status}`)
+    if (affectedCurrent) options.onCredentialRejected?.()
+    if (affectedCurrent && pendingConfiguration) {
+      const next = pendingConfiguration
+      pendingConfiguration = null
+      activateConfiguration(next)
+    }
+  }
+
+  const runnerRequest = async (state, requestPath, request = {}) => {
+    if (!isCurrent(state)) {
+      throw state.controller.signal.reason ?? new Error("Automation runner generation retired")
+    }
+    try {
+      return await requestJson(
+        fetchImpl,
+        state.configuration.baseUrl,
+        state.configuration.token,
+        requestPath,
+        { ...request, signal: state.controller.signal },
+      )
+    } catch (error) {
+      if ([401, 403].includes(error?.status)) rejectCredential(state, error.status)
+      throw error
+    }
+  }
+
+  const heartbeat = async (state) => {
+    const active = state.active
+    if (!active || !isCurrent(state)) return
     const response = await runnerRequest(
+      state,
       `/v1/automation-runs/${encodeURIComponent(active.assignment.runId)}/heartbeat`,
       { method: "POST", body: { attempt: active.assignment.attempt } },
     )
-    if (response.cancelRequested || response.leaseValid !== true) {
+    if (state.active === active && (response.cancelRequested || response.leaseValid !== true)) {
       active.controller.abort(new Error("Automation run cancelled or lease lost"))
     }
   }
 
-  const runAssignment = async (assignment) => {
+  let activateConfiguration
+
+  const runAssignment = async (state, assignment) => {
     const controller = new AbortController()
-    active = { assignment, controller }
+    const active = { assignment, controller }
+    state.active = active
     let sequence = 0
     const event = (type, payload) => runnerRequest(
+      state,
       `/v1/automation-runs/${encodeURIComponent(assignment.runId)}/events`,
       { method: "POST", body: { attempt: assignment.attempt, sequence: ++sequence, type, payload, createdAt: Date.now() } },
     )
-    const heartbeatTimer = setInterval(() => void heartbeat().catch((error) => controller.abort(error)), 10_000)
+    const heartbeatTimer = setInterval(() => void heartbeat(state).catch((error) => controller.abort(error)), heartbeatIntervalMs)
     let result
     try {
       await event("user", { text: assignment.instructions, executionTarget: "desktop" })
@@ -269,91 +329,90 @@ export function createDesktopAutomationRunner(options) {
     }
     try {
       await event("terminal", { status: result.status, executionTarget: "desktop", sessionId: result.sessionId })
-      await runnerRequest(`/v1/automation-runs/${encodeURIComponent(assignment.runId)}/complete`, {
+      await runnerRequest(state, `/v1/automation-runs/${encodeURIComponent(assignment.runId)}/complete`, {
         method: "POST",
         body: { ...result, attempt: assignment.attempt },
       })
     } finally {
-      active = null
+      if (state.active === active) state.active = null
+      if (isCurrent(state) && pendingConfiguration) {
+        const next = pendingConfiguration
+        pendingConfiguration = null
+        activateConfiguration(next)
+      }
     }
   }
 
-  const reconcile = () => {
-    if (!configuration || stopped) return Promise.resolve()
-    if (reconcilePromise) return reconcilePromise
-    reconcilePromise = (async () => {
-      while (configuration && !stopped) {
-        const response = await runnerRequest("/v1/automation-runner/work")
+  const reconcile = (state) => {
+    if (!isCurrent(state)) return Promise.resolve()
+    if (state.reconcilePromise) return state.reconcilePromise
+    const promise = (async () => {
+      while (isCurrent(state)) {
+        const response = await runnerRequest(state, "/v1/automation-runner/work")
+        if (!isCurrent(state)) break
         const item = response?.items?.[0]
         if (!item?.runId) break
-        const claimed = await runnerRequest(`/v1/automation-runs/${encodeURIComponent(item.runId)}/claim`, { method: "POST", body: {} })
-        if (!claimed?.assignment) break
-        await runAssignment(claimed.assignment)
-      }
-    })().catch((error) => options.log?.(`reconcile failed: ${error instanceof Error ? error.message : String(error)}`))
-      .finally(() => { reconcilePromise = null })
-    return reconcilePromise
-  }
-
-  const consumeSse = async (response, localGeneration) => {
-    if (!response.ok || !response.body) throw new Error(`SSE returned ${response.status}`)
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ""
-    while (!stopped && localGeneration === generation) {
-      const { done, value } = await reader.read()
-      if (done) return
-      buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n")
-      let boundary
-      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
-        const block = buffer.slice(0, boundary)
-        buffer = buffer.slice(boundary + 2)
-        let eventType = "message"
-        let eventData = null
-        for (const line of block.split("\n")) {
-          if (line.startsWith("id:")) {
-            const value = Number(line.slice(3).trim())
-            if (Number.isSafeInteger(value) && value > lastEventId) lastEventId = value
-          }
-          if (line.startsWith("event:")) eventType = line.slice(6).trim()
-          if (line.startsWith("data:")) {
-            try { eventData = JSON.parse(line.slice(5).trim()) } catch { eventData = null }
-          }
+        state.claimInFlight = true
+        let claimed
+        try {
+          claimed = await runnerRequest(state, `/v1/automation-runs/${encodeURIComponent(item.runId)}/claim`, { method: "POST", body: {} })
+        } finally {
+          state.claimInFlight = false
         }
-        await heartbeat().catch(() => undefined)
-        if (
-          eventType !== "keepalive"
-          && eventData?.cursor === String(lastEventId)
-          && ["automation_work_available", "automation_cancellation_available"].includes(eventData?.type)
-        ) void reconcile()
+        if (!claimed?.assignment) break
+        await runAssignment(state, claimed.assignment)
+      }
+    })().finally(() => {
+      if (state.reconcilePromise === promise) state.reconcilePromise = null
+      if (isCurrent(state) && pendingConfiguration && !state.active) {
+        const next = pendingConfiguration
+        pendingConfiguration = null
+        activateConfiguration(next)
+      }
+    })
+    state.reconcilePromise = promise
+    return promise
+  }
+
+  const connectLoop = async (state) => {
+    let reconnectAttempt = 0
+    while (isCurrent(state)) {
+      try {
+        await reconcile(state)
+        reconnectAttempt = 0
+        await waitBeforeReconnect(RUNNER_WORK_POLL_MS, state.controller.signal)
+      } catch (error) {
+        if (!isCurrent(state)) return
+        if ([401, 403].includes(error?.status)) return
+        options.log?.(`runner polling failed: ${error instanceof Error ? error.message : String(error)}`)
+        const backoff = Math.min(30_000, 500 * (2 ** reconnectAttempt++))
+        try {
+          await waitBeforeReconnect(Math.round(backoff * (0.5 + random())), state.controller.signal)
+        } catch (waitError) {
+          if (!isCurrent(state)) return
+          options.log?.(`runner polling wait failed: ${waitError instanceof Error ? waitError.message : String(waitError)}`)
+        }
       }
     }
   }
 
-  const connectLoop = async (localGeneration) => {
-    let reconnectAttempt = 0
-    while (!stopped && configuration && localGeneration === generation) {
-      connectionController = new AbortController()
-      void reconcile()
-      try {
-        const response = await fetchImpl(`${configuration.baseUrl.replace(/\/+$/, "")}/v1/automation-runners/events`, {
-          headers: {
-            Accept: "text/event-stream",
-            Authorization: `Bearer ${configuration.token}`,
-            ...(lastEventId > 0 ? { "Last-Event-ID": String(lastEventId) } : {}),
-          },
-          signal: connectionController.signal,
-        })
-        options.log?.("SSE connected")
-        reconnectAttempt = 0
-        await consumeSse(response, localGeneration)
-      } catch (error) {
-        if (stopped || localGeneration !== generation) return
-        options.log?.(`SSE reconnecting: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      const backoff = Math.min(30_000, 500 * (2 ** reconnectAttempt++))
-      await sleep(Math.round(backoff * (0.5 + Math.random())), new AbortController().signal)
+  activateConfiguration = (configuration) => {
+    const previous = current
+    generation += 1
+    if (previous) retire(previous, new Error("Automation runner configuration changed"))
+    if (!configuration || stopped) return
+    const state = {
+      generation,
+      configuration,
+      controller: new AbortController(),
+      reconcilePromise: null,
+      claimInFlight: false,
+      active: null,
+      retired: false,
+      credentialRejected: false,
     }
+    current = state
+    void connectLoop(state)
   }
 
   return {
@@ -375,22 +434,30 @@ export function createDesktopAutomationRunner(options) {
         options.log?.(`rejected runner credential for ${baseUrl ?? "an unusable base URL"}`
           + `: token audience ${binding?.audience ?? (binding ? "v1 (untrusted here)" : "unreadable")}`)
       }
-      if (configuration?.baseUrl === normalized?.baseUrl && configuration?.token === normalized?.token) {
-        return { connected: Boolean(connectionController && !connectionController.signal.aborted) }
+      if (normalized && rejectedCredentials.has(credentialKey(normalized))) {
+        return { connected: false }
       }
-      configuration = normalized
-      generation += 1
-      connectionController?.abort()
-      connectionController = null
-      if (!configuration) active?.controller.abort(new Error("Automation runner disconnected"))
-      if (configuration && !stopped) void connectLoop(generation)
+      if (
+        normalized
+        && current?.configuration.baseUrl === normalized.baseUrl
+        && current.configuration.token === normalized.token
+      ) {
+        pendingConfiguration = null
+        return { connected: !current.controller.signal.aborted }
+      }
+      if (normalized && (current?.active || current?.claimInFlight)) {
+        pendingConfiguration = normalized
+        return { connected: !current.controller.signal.aborted }
+      }
+      pendingConfiguration = null
+      activateConfiguration(normalized)
       return { connected: false }
     },
     stop() {
       stopped = true
       generation += 1
-      connectionController?.abort()
-      active?.controller.abort(new Error("Desktop is shutting down"))
+      pendingConfiguration = null
+      if (current) retire(current, new Error("Desktop is shutting down"))
     },
   }
 }

@@ -54,8 +54,10 @@ import {
 } from "./native-capabilities.js"
 import {
   compareCapabilityMatches,
+  EXECUTE_CAPABILITY_TOOL_NAME,
   searchCapabilities,
   searchCapabilitySourceFilter,
+  SEARCH_CAPABILITIES_TOOL_NAME,
   type CapabilityMatch,
   type SearchCapabilityType,
 } from "./search.js"
@@ -77,6 +79,7 @@ export type ExecuteCapabilityToolResult = {
   isError?: boolean
   content: AgentToolContentPart[]
   structuredContent?: Record<string, unknown>
+  _meta?: Record<string, unknown>
 }
 
 export type CapabilityExecuteInput = {
@@ -98,6 +101,7 @@ export type CapabilityRegistryContext = {
   codemodeEnabled: boolean
   generatedArtifactViewsEnabled: boolean
   externalMcpConnectionsEnabled: boolean
+  mcpAppsEnabled: boolean
   resolvePlatformAdmin: () => Promise<boolean>
   resolveNamespaceContext: () => Promise<CodemodeConnectionNamespaceContext>
 }
@@ -114,6 +118,7 @@ export type CapabilityRegistryContextInput = {
   generatedArtifactViewsEnabled: boolean
   organizationMetadata: Parameters<typeof memberFacingMcpConnectionsEnabled>[0]
   mcpConnectionsGatingEnabled: boolean
+  mcpAppsEnabled?: boolean
 }
 
 export function createCapabilityRegistryContext(input: CapabilityRegistryContextInput): CapabilityRegistryContext {
@@ -145,6 +150,7 @@ export function createCapabilityRegistryContext(input: CapabilityRegistryContext
     codemodeEnabled: input.codemodeEnabled,
     generatedArtifactViewsEnabled: input.generatedArtifactViewsEnabled,
     externalMcpConnectionsEnabled,
+    mcpAppsEnabled: input.mcpAppsEnabled === true,
     resolvePlatformAdmin,
     resolveNamespaceContext,
   }
@@ -154,23 +160,12 @@ export function catalogOperationAvailableToCapabilities(
   context: Pick<CapabilityRegistryContext, "generatedArtifactViewsEnabled">,
   operation: Pick<McpToolOperation, "method" | "path">,
 ) {
-  // Installation is reachable only through the dedicated model-visible MCP
-  // tool. This also prevents a sandboxed App or a Program from finding and
-  // invoking the REST importer through the generic capability gateway.
-  if (operation.method === "POST" && operation.path === "/v1/remote-mcp-apps") return false
+  // Standalone URL-App operations are deferred and never enter the generic
+  // capability gateway, even if their retained storage routes are reworked.
+  if (operation.path.startsWith("/v1/remote-mcp-apps")) return false
   if (context.generatedArtifactViewsEnabled) return true
   return operation.path !== "/v1/programs/{configObjectId}/views"
     && !operation.path.startsWith("/v1/artifact-views/")
-}
-
-export function catalogOperationChangesRemoteMcpAppDiscovery(
-  operation: Pick<McpToolOperation, "method" | "path">,
-) {
-  return operation.method !== "GET"
-    && operation.path.startsWith("/v1/remote-mcp-apps/")
-    && (operation.path.endsWith("/refresh")
-      || operation.path.endsWith("/activate")
-      || operation.path.endsWith("/lifecycle"))
 }
 
 type CapabilitySearchContext = CapabilityRegistryContext & {
@@ -269,11 +264,33 @@ export function externalCapabilitySuccessToolResult(
   result: Extract<ExternalCapabilityExecuteResult, { ok: true }>,
 ): ExecuteCapabilityToolResult {
   const content = externalToolContent(result.result)
-  const structuredContent = isRecord(result.result)
+  const providerStructuredContent = isRecord(result.result)
     && isRecord(result.result.structuredContent)
     ? result.result.structuredContent
     : undefined
-  if (!result.schemaGuidance) return { content, ...(structuredContent ? { structuredContent } : {}) }
+  const structuredContent = result.mcpApp
+    ? {
+        ...(providerStructuredContent ?? {}),
+        serverTools: {
+          searchCapabilities: SEARCH_CAPABILITIES_TOOL_NAME,
+          executeCapability: EXECUTE_CAPABILITY_TOOL_NAME,
+        },
+      }
+    : providerStructuredContent
+  const providerMeta = isRecord(result.result) && isRecord(result.result._meta)
+    ? result.result._meta
+    : {}
+  const meta = {
+    ...providerMeta,
+    ...(result.mcpApp ? { "openwork/mcpApp": result.mcpApp } : {}),
+  }
+  if (!result.schemaGuidance) {
+    return {
+      content,
+      ...(structuredContent ? { structuredContent } : {}),
+      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
+    }
+  }
   return {
     content: [
       ...content,
@@ -283,6 +300,7 @@ export function externalCapabilitySuccessToolResult(
       ...(structuredContent ?? {}),
       schemaGuidance: result.schemaGuidance,
     },
+    ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
   }
 }
 
@@ -484,6 +502,7 @@ const externalMcpSource: CapabilitySource = {
       limit,
       includeScriptPaths: ctx.codemodeEnabled,
       namespaceContext: ctx.codemodeEnabled ? await ctx.resolveNamespaceContext() : undefined,
+      mcpAppsEnabled: ctx.mcpAppsEnabled,
       reportCoverage: (coverage) => ctx.reportExternalCoverage(externalMcpSearchCoverageHint(coverage)),
     })
   },
@@ -515,6 +534,7 @@ const externalMcpSource: CapabilitySource = {
       args: normalizeToolBody(input.body),
       schemaDigest: input.schemaDigest,
       redirectUriBase: ctx.redirectUriBase,
+      mcpAppsEnabled: ctx.mcpAppsEnabled,
     })
     return result.ok
       ? externalCapabilitySuccessToolResult(result)

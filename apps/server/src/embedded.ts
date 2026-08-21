@@ -25,6 +25,7 @@ import { createManagedOpencodeServer, type ManagedOpencodeServer, type OpencodeE
 import {
   clearTrustedOpencodeProcess,
   createEnginePoolForConfig,
+  createServerLogger,
   registerTrustedOpencodeProcess,
   startServer,
   syncAllWorkspacesRuntimeMcpToEngine,
@@ -68,6 +69,7 @@ export type EmbeddedServerHandle = {
 export async function startEmbeddedServer(options: EmbeddedServerOptions): Promise<EmbeddedServerHandle> {
   const config = await resolveServerConfig(options);
   config.localManagedMcpVaultKey = options.localManagedMcpVaultKey;
+  const logger = createServerLogger(config);
 
   // Spawn managed OpenCode if requested and no explicit base URL was provided.
   let managedOpencode: ManagedOpencodeServer | null = null;
@@ -281,7 +283,12 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   // workspace's runtime-DB MCPs into the engine so they aren't invisible
   // until a manual reload. Best-effort.
   if (managedOpencode) {
-    void syncAllWorkspacesRuntimeMcpToEngine(config);
+    void syncAllWorkspacesRuntimeMcpToEngine(config).catch((error) => {
+      logger.log("error", "Startup MCP synchronization crashed.", {
+        "mcp.trigger": "startup",
+        "mcp.failure.message": error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   if (managedOpencode && engineSpawnTemplate) {

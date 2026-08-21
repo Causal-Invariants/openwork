@@ -123,6 +123,12 @@ export type DenAssignedMarketplaceCapability = {
   pluginId: string;
 };
 
+export type DenMeLibraryPlugin = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
 export type DenResourceSnapshotConfigItem = {
   configItemId: string;
   lastUpdatedAt: string;

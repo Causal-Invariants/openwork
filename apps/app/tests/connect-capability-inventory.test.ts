@@ -184,6 +184,14 @@ describe("assigned OpenWork Connect capability inventory", () => {
       }),
     ]);
     expect(inventory.mcpStatuses[inventory.mcpServers[0]?.id ?? ""]).toEqual({ status: "connected" });
+    expect(inventory.plugins).toEqual([
+      expect.objectContaining({
+        pluginId: "plugin_1",
+        name: "Support kit",
+        marketplaceName: "Team tools",
+      }),
+    ]);
+    expect(inventory.plugins[0]?.files.map((file) => file.objectType)).toEqual(["skill", "mcp"]);
   });
 
   test("only uses marketplaces visible to the member and ignores inactive objects", async () => {
@@ -343,5 +351,58 @@ describe("assigned OpenWork Connect capability inventory", () => {
     const byName = Object.fromEntries(inventory.skills.map((skill) => [skill.name, skill]));
     expect(byName["Windows skill"]?.trigger).toBe("escalate-ticket");
     expect(byName["Loose skill"]?.trigger).toBeUndefined();
+  });
+
+  test("includes plugins from My Library even when no marketplace is assigned", async () => {
+    const inventory = await listAssignedConnectCapabilities({
+      organizationId: "org_1",
+      client: {
+        listAssignedMarketplaceCapabilities: async () => [],
+        listMeLibraryPlugins: async () => [
+          { id: "plugin_mine", name: "Briefing kit", description: "My plugin" },
+        ],
+        listOrgMarketplaces: async () => [],
+        getOrgMarketplaceResolved: async () => {
+          throw new Error("marketplace resolve should not run");
+        },
+        getOrgPluginResolved: async (_organizationId, plugin) => ({
+          plugin,
+          memberships: [
+            {
+              id: "membership_skill",
+              pluginId: plugin.id,
+              configObjectId: "skill_mine",
+              configObject: {
+                id: "skill_mine",
+                objectType: "skill",
+                title: "Customer briefing",
+                description: null,
+                currentFileName: "SKILL.md",
+                currentFileExtension: "md",
+                currentRelativePath: "skills/customer-briefing/SKILL.md",
+                status: "active",
+                updatedAt: null,
+                latestVersion: {
+                  id: "version_skill",
+                  rawSourceText: "# Brief",
+                  normalizedPayloadJson: null,
+                  sourceRevisionRef: null,
+                  createdAt: null,
+                },
+              },
+            },
+          ],
+        }),
+      },
+    });
+
+    expect(inventory.plugins).toEqual([
+      expect.objectContaining({
+        pluginId: "plugin_mine",
+        name: "Briefing kit",
+        marketplaceName: "Library",
+      }),
+    ]);
+    expect(inventory.skills.map((skill) => skill.name)).toEqual(["Customer briefing"]);
   });
 });

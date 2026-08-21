@@ -41,9 +41,9 @@ config:
     installLinksGatingEnabled: "false"
     # Enable only after compatible Desktop MCP Apps hosts are deployed.
     generatedArtifactViewsEnabled: "false"
-    # Imported, cached standard MCP Apps are on by default after the compatible
-    # Desktop host rollout. Set false for an operator rollback.
-    remoteMcpAppsEnabled: "true"
+    # Master opt-in for native and imported MCP Apps. Each organization must
+    # also be explicitly enabled in Den admin settings.
+    remoteMcpAppsEnabled: "false"
     connectLinkMode: exchange
     connectLinkKeyId: ""
     openworkAppConnectUrl: ""
@@ -168,6 +168,7 @@ secret:
     githubConnectorAppPrivateKey: GITHUB_CONNECTOR_APP_PRIVATE_KEY
     githubConnectorAppWebhookSecret: GITHUB_CONNECTOR_APP_WEBHOOK_SECRET
     connectLinkPrivateKey: DEN_CONNECT_LINK_PRIVATE_KEY
+    initialAdminBootstrapCode: DEN_INITIAL_ADMIN_BOOTSTRAP_CODE
   values:
     databaseUrl: mysql://openwork:change-me@mysql:3306/openwork_den
     databaseRedisUrl: ""
@@ -188,6 +189,7 @@ secret:
     githubConnectorAppPrivateKey: ""
     githubConnectorAppWebhookSecret: ""
     connectLinkPrivateKey: ""
+    initialAdminBootstrapCode: ""
 
 installerArtifacts:
   enabled: false

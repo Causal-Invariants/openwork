@@ -6,7 +6,6 @@ import {
   OPENWORK_CLOUD_MCP_CONNECTION_ACTION_SOURCE,
   OPENWORK_CLOUD_MCP_CONNECTION_ACTION_VERSION,
 } from "@openwork/types/den/mcp-connection-action"
-import { MemberTable } from "@openwork-ee/den-db/schema"
 import { normalizeDenTypeId, type DenTypeId } from "@openwork-ee/utils/typeid"
 import {
   getExternalMcpConnection,
@@ -31,6 +30,7 @@ import {
   evaluateToolPolicy,
   isToolDisabled,
 } from "../capability-sources/external-mcp-tool-policy.js"
+import { cache } from "../cache.js"
 import { db } from "../db.js"
 import { listTeamsForMember } from "../orgs.js"
 import { openworkOrganizationConnectionsUrl, openworkYourConnectionsUrl } from "./connection-navigation.js"
@@ -109,16 +109,10 @@ export async function resolveMcpMemberIdentity(input: {
   organizationId: string
 }): Promise<McpMemberIdentity | null> {
   const organizationId = normalizeDenTypeId("organization", input.organizationId)
-  const rows = await db
-    .select({ id: MemberTable.id })
-    .from(MemberTable)
-    .where(and(
-      eq(MemberTable.userId, normalizeDenTypeId("user", input.userId)),
-      eq(MemberTable.organizationId, organizationId),
-      isNull(MemberTable.removedAt),
-    ))
-    .limit(1)
-  const member = rows[0]
+  const member = await cache.org.membership({
+    organizationId,
+    userId: normalizeDenTypeId("user", input.userId),
+  })
   if (!member) return null
   const teams = await listTeamsForMember({ organizationId, memberId: member.id })
   return { orgMembershipId: member.id, teamIds: teams.map((team) => team.id) }
@@ -180,11 +174,18 @@ export type ExternalCapabilityMatch = CapabilityMatch & {
   /** Tells the generic execute facade where MCP arguments must be supplied. */
   invocation?: { argumentsField: "body" }
   /** Distinguishes a connection-health result from a callable capability. */
-  kind?: "connection_status"
+  kind?: "connection_status" | "mcp_app"
   /** Set for connection-level status rows: the tool exists but needs a human/admin fix before real tools can be listed. */
   status?: "needs_connection" | "error"
   hint?: string
   connectionStatus?: ExternalConnectionStatus
+}
+
+export type ExternalMcpAppLaunch = {
+  connectionId: string
+  toolName: string
+  resourceUri: string
+  arguments: Record<string, unknown>
 }
 
 export type ExternalConnectionStatus = {
@@ -225,6 +226,17 @@ const PROVIDER_ADMIN_ACTION_PATTERN = /\b(?:app (?:is )?not installed|admin(?:is
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+export function externalMcpAppResourceUri(tool: { _meta?: unknown }): string | null {
+  const meta = isRecord(tool._meta) ? tool._meta : {}
+  const ui = isRecord(meta.ui) ? meta.ui : {}
+  const resourceUri = typeof ui.resourceUri === "string"
+    ? ui.resourceUri
+    : typeof meta["ui/resourceUri"] === "string"
+      ? meta["ui/resourceUri"]
+      : null
+  return resourceUri?.startsWith("ui://") ? resourceUri : null
 }
 
 function cappedErrorMessage(message: string): string {
@@ -643,6 +655,7 @@ async function probeExternalMcpConnection(input: {
   limit: number
   deadline: ExternalMcpLifecycleDeadline
   scriptNamespace?: string
+  mcpAppsEnabled: boolean
 }): Promise<ExternalCapabilityMatch[]> {
   const matches: ExternalCapabilityMatch[] = []
   const add = (match: ExternalCapabilityMatch) => {
@@ -783,6 +796,7 @@ async function probeExternalMcpConnection(input: {
     const summaryTokens = tokenize(summary)
     const score = scoreText(nameTokens, summaryTokens, input.queryTokens)
     if (score <= 0) continue
+    const resourceUri = input.mcpAppsEnabled ? externalMcpAppResourceUri(tool) : null
     add({
       name: buildExternalCapabilityName(connection.id, tool.name),
       method: "MCP",
@@ -795,6 +809,7 @@ async function probeExternalMcpConnection(input: {
       argumentsSchema: tool.inputSchema,
       schemaDigest: externalMcpToolSchemaDigest(tool.inputSchema),
       invocation: { argumentsField: "body" },
+      ...(resourceUri ? { kind: "mcp_app" as const, mcpApp: { resourceUri } } : {}),
       ...(input.scriptNamespace ? { scriptPath: codemodeScriptPath(input.scriptNamespace, tool.name) } : {}),
     })
   }
@@ -816,6 +831,7 @@ export async function searchExternalCapabilities(input: {
   includeScriptPaths?: boolean
   namespaceContext?: CodemodeConnectionNamespaceContext
   reportCoverage?: (coverage: ExternalMcpSearchCoverage) => void
+  mcpAppsEnabled?: boolean
 }): Promise<ExternalCapabilityMatch[]> {
   if (!input.member) return []
   const queryTokens = tokenize(input.query)
@@ -854,6 +870,7 @@ export async function searchExternalCapabilities(input: {
       limit,
       deadline: sharedDeadline,
       scriptNamespace: scriptNamespaces?.get(connection.id),
+      mcpAppsEnabled: input.mcpAppsEnabled === true,
     }),
   })
 }
@@ -890,6 +907,7 @@ export type ExternalCapabilityExecuteResult =
       ok: true
       result: Awaited<ReturnType<typeof callExternalMcpTool>>
       schemaGuidance?: ExternalMcpSchemaGuidance
+      mcpApp?: ExternalMcpAppLaunch
     }
   | {
       ok: false
@@ -1007,6 +1025,7 @@ export async function executeExternalCapability(input: {
   requireReadOnly?: boolean
   /** Fail closed when the live input schema no longer matches schemaDigest. */
   requireSchemaMatch?: boolean
+  mcpAppsEnabled?: boolean
 }): Promise<ExternalCapabilityExecuteResult> {
   if (!input.member) {
     return { ok: false, error: "forbidden", message: "No active org membership for this token." }
@@ -1195,10 +1214,21 @@ export async function executeExternalCapability(input: {
 
     schemaGuidance = advisorySchemaGuidance(schemaWarnings)
     const result = await providerCall
+    const resourceUri = input.mcpAppsEnabled === true ? externalMcpAppResourceUri(tool) : null
     return {
       ok: true,
       result,
       ...(schemaGuidance ? { schemaGuidance } : {}),
+      ...(resourceUri
+        ? {
+            mcpApp: {
+              connectionId: connection.id,
+              toolName: tool.name,
+              resourceUri,
+              arguments: forwardedArguments,
+            },
+          }
+        : {}),
     }
   } catch (error) {
     const message = upstreamErrorMessage(error)

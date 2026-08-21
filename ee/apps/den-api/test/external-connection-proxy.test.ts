@@ -9,6 +9,7 @@ process.env.OPENWORK_DEV_MODE ??= "1"
 process.env.DATABASE_URL ??= "mysql://root:password@127.0.0.1:3306/openwork_den"
 
 const {
+  createDisabledExternalConnectionProxyServer,
   createExternalConnectionProxyServer,
   handleExternalConnectionProxyRequest,
 } = await import("../src/mcp/external-connection-proxy.js")
@@ -68,6 +69,7 @@ async function withClient<T>(
   capabilities: Record<string, unknown>,
   run: (client: Client) => Promise<T>,
   runtimeOverrides: Record<string, unknown> = {},
+  appHostClient = true,
 ) {
   const server = createExternalConnectionProxyServer({
     descriptor: {
@@ -76,6 +78,7 @@ async function withClient<T>(
     } as never,
     operation,
     runtime: runtime(runtimeOverrides),
+    appHostClient,
   })
   const client = new Client({ name: "proxy-test", version: "1.0.0" }, { capabilities: {} })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
@@ -89,13 +92,101 @@ async function withClient<T>(
   }
 }
 
+test("ordinary MCP clients receive only bounded search and execute without the per-provider App surface", async () => {
+  await withClient({ tools: {}, resources: {} }, async (client) => {
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+      "search_capabilities",
+      "execute_capability",
+    ])
+    expect((await client.listResources()).resources).toEqual([])
+    expect((await client.listResourceTemplates()).resourceTemplates).toEqual([])
+    const searched = await client.callTool({ name: "search_capabilities", arguments: { query: "fixture" } })
+    const matches = (searched.structuredContent as { matches: Array<Record<string, unknown>> }).matches
+    expect(matches).toContainEqual(expect.objectContaining({ name: "open_fixture" }))
+    expect(matches[0]?.kind).toBeUndefined()
+    expect(matches[0]?.mcpApp).toBeUndefined()
+    expect((await client.callTool({ name: "execute_capability", arguments: { name: "open_fixture", body: {} } })).structuredContent)
+      .toEqual({ status: "healthy" })
+    await expect(client.callTool({ name: "open_fixture", arguments: {} }))
+      .rejects.toThrow("Use search_capabilities and execute_capability")
+    await expect(client.readResource({ uri: resourceUri }))
+      .rejects.toThrow("only through the OpenWork App host")
+  }, {}, false)
+})
+
+test("legacy clients retain ordinary operations through bounded search and execute only", async () => {
+  await withClient({ tools: {}, resources: {} }, async (client) => {
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+      "search_capabilities",
+      "execute_capability",
+    ])
+    expect((await client.listResources()).resources).toEqual([])
+    expect((await client.listResourceTemplates()).resourceTemplates).toEqual([])
+    const searched = await client.callTool({ name: "search_capabilities", arguments: { query: "ordinary records" } })
+    expect((searched.structuredContent as { matches: Array<Record<string, unknown>> }).matches).toEqual([
+      expect.objectContaining({ name: "search_fixture" }),
+    ])
+    expect((await client.callTool({
+      name: "execute_capability",
+      arguments: { name: "search_fixture", body: { query: "ordinary" } },
+    })).structuredContent).toEqual({ status: "healthy" })
+    await expect(client.callTool({ name: "search_fixture", arguments: { query: "ordinary" } }))
+      .rejects.toThrow("Use search_capabilities and execute_capability")
+    await expect(client.readResource({ uri: resourceUri }))
+      .rejects.toThrow("only through the OpenWork App host")
+  }, {
+    listTools: async () => [{
+      name: "search_fixture",
+      description: "Search ordinary fixture records.",
+      inputSchema: { type: "object" },
+    }],
+  }, false)
+})
+
+test("a forged App-host audience header cannot unlock the provider surface", async () => {
+  let toolNames: string[] = []
+  const request = new Request("https://openwork.example/mcp/agent/connections/fixture", {
+    method: "POST",
+    headers: { "x-openwork-mcp-client-audience": "app-host" },
+  })
+  await handleExternalConnectionProxyRequest({
+    context: requestContext(request),
+    operation,
+    runtime: runtime(),
+    dependencies: {
+      describe: async () => ({
+        capabilities: { tools: {}, resources: {} },
+        serverInfo: { name: "fixture", version: "1.0.0" },
+      }) as never,
+      serve: async (server) => {
+        const client = new Client({ name: "forged-audience-test", version: "1.0.0" }, { capabilities: {} })
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+        await server.connect(serverTransport)
+        await client.connect(clientTransport)
+        try {
+          toolNames = (await client.listTools()).tools.map((tool) => tool.name)
+        } finally {
+          await client.close()
+          await server.close()
+        }
+        return new Response(null, { status: 204 })
+      },
+    },
+  })
+  expect(toolNames).toEqual(["search_capabilities", "execute_capability"])
+})
+
 test("tool-only downstream servers initialize and never register resource handlers", async () => {
   let resourceCalls = 0
   await withClient({ tools: {} }, async (client) => {
     const initialized = client.getServerCapabilities()
     expect(initialized?.tools).toEqual({ listChanged: false })
     expect(initialized?.resources).toBeUndefined()
-    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["open_fixture"])
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+      "search_capabilities",
+      "execute_capability",
+      "open_fixture",
+    ])
     const called = await client.callTool({ name: "open_fixture", arguments: {} })
     expect(called.structuredContent).toEqual({ status: "healthy" })
     expect(resourceCalls).toBe(0)
@@ -119,12 +210,101 @@ test("a healthy native MCP App preserves its resource and same-server app-visibl
     resources: {},
     extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
   }, async (client) => {
-    const tool = (await client.listTools()).tools[0]
-    expect(tool?._meta).toMatchObject({ ui: { resourceUri, visibility: ["model", "app"] } })
+    const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "open_fixture")
+    expect(tool?._meta).toMatchObject({ ui: { resourceUri, visibility: ["app"] } })
     const resource = await client.readResource({ uri: resourceUri })
     expect(resource.contents[0]).toMatchObject({ uri: resourceUri, text: html })
     const called = await client.callTool({ name: "open_fixture", arguments: {} })
     expect(called.structuredContent).toEqual({ status: "healthy" })
+  })
+})
+
+test("a regular MCP with an App keeps every model-visible tool behind search and execute", async () => {
+  let downstreamCalls = 0
+  let downstreamReads = 0
+  const privateResourceUri = "data://fixture/private.json"
+  const modelOnlyResourceUri = "ui://fixture/model-only.html"
+  await withClient({ tools: {}, resources: {} }, async (client) => {
+    const tools = (await client.listTools()).tools
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "search_capabilities",
+      "execute_capability",
+      "open_fixture",
+    ])
+    for (const tool of tools) expect(tool._meta).toMatchObject({ ui: { visibility: ["app"] } })
+    expect(tools.find((tool) => tool.name === "open_fixture")?._meta).toMatchObject({
+      ui: { resourceUri, visibility: ["app"] },
+    })
+
+    const resources = (await client.listResources()).resources
+    expect(resources.map((resource) => resource.uri)).toEqual([resourceUri])
+    expect((await client.listResourceTemplates()).resourceTemplates).toEqual([])
+
+    await expect(client.callTool({ name: "search_fixture", arguments: { query: "private" } })).rejects.toThrow(
+      "Use search_capabilities and execute_capability",
+    )
+    await expect(client.callTool({ name: "model_only_fixture", arguments: {} })).rejects.toThrow(
+      "Use search_capabilities and execute_capability",
+    )
+    await expect(client.readResource({ uri: privateResourceUri })).rejects.toThrow(
+      "not bound to an available MCP App tool",
+    )
+    await expect(client.readResource({ uri: modelOnlyResourceUri })).rejects.toThrow(
+      "not bound to an available MCP App tool",
+    )
+    expect(downstreamCalls).toBe(0)
+    expect(downstreamReads).toBe(0)
+
+    const searched = await client.callTool({
+      name: "search_capabilities",
+      arguments: { query: "private fixture records", limit: 5 },
+    })
+    const matches = (searched.structuredContent as { matches: Array<Record<string, unknown>> }).matches
+    expect(matches).toContainEqual(expect.objectContaining({
+      name: "search_fixture",
+      invocation: { argumentsField: "body" },
+    }))
+    const executed = await client.callTool({
+      name: "execute_capability",
+      arguments: { name: "search_fixture", body: { query: "private" } },
+    })
+    expect(executed.structuredContent).toEqual({ status: "healthy" })
+    expect(downstreamCalls).toBe(1)
+
+    const opened = await client.callTool({ name: "open_fixture", arguments: {} })
+    expect(opened.structuredContent).toEqual({ status: "healthy" })
+    expect(downstreamCalls).toBe(2)
+  }, {
+    listTools: async () => [
+      ...(await runtime().listTools()),
+      {
+        name: "search_fixture",
+        description: "Search private fixture records.",
+        inputSchema: { type: "object" },
+      },
+      {
+        name: "model_only_fixture",
+        description: "A model-only UI tool that must not be projected into the App host.",
+        inputSchema: { type: "object" },
+        _meta: { ui: { resourceUri: modelOnlyResourceUri, visibility: ["model"] } },
+      },
+    ],
+    callTool: async () => {
+      downstreamCalls += 1
+      return {
+        content: [{ type: "text" as const, text: "Healthy fixture opened." }],
+        structuredContent: { status: "healthy" },
+      }
+    },
+    listResources: async () => [
+      { uri: resourceUri, name: "Healthy fixture", mimeType: "text/html;profile=mcp-app" },
+      { uri: modelOnlyResourceUri, name: "Model-only fixture", mimeType: "text/html;profile=mcp-app" },
+      { uri: privateResourceUri, name: "Private fixture", mimeType: "application/json" },
+    ],
+    readResource: async () => {
+      downstreamReads += 1
+      return { contents: [] }
+    },
   })
 })
 
@@ -206,6 +386,30 @@ test("unsupported GET requests never trigger downstream discovery", async () => 
   expect(discoveryCalls).toBe(0)
 })
 
+test("the disabled MCP Apps rollout publishes no providers and gives stale clients an empty MCP surface", async () => {
+  expect(buildConnectMcpServerIndex({
+    enabled: false,
+    connections: [connection],
+    publicOrigin: "https://openwork.example",
+  }).servers).toEqual([])
+
+  const server = createDisabledExternalConnectionProxyServer()
+  const client = new Client({ name: "stale-proxy-test", version: "1.0.0" }, { capabilities: {} })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  try {
+    expect(client.getServerCapabilities()?.tools).toEqual({ listChanged: false })
+    expect(client.getServerCapabilities()?.resources).toEqual({ listChanged: false, subscribe: false })
+    expect((await client.listTools()).tools).toEqual([])
+    expect((await client.listResources()).resources).toEqual([])
+    expect((await client.listResourceTemplates()).resourceTemplates).toEqual([])
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
 test("disconnected and issuer-blocked OAuth connections are not ready for the native server index", async () => {
   const memberId = "mem_01k28e8q8pf8r9sff9mhyqxved" as never
   const base = {
@@ -244,6 +448,7 @@ test("disconnected and issuer-blocked OAuth connections are not ready for the na
 
   const ready = await readyExternalMcpConnectionsForMember([base], memberId)
   expect(buildConnectMcpServerIndex({
+    enabled: true,
     connections: ready,
     publicOrigin: "https://openwork.example",
   }).servers).toEqual([])

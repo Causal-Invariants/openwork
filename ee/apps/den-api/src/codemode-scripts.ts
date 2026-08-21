@@ -22,7 +22,7 @@ import {
   TeamMemberTable,
 } from "@openwork-ee/den-db/schema"
 import { createDenTypeId, normalizeDenTypeId, type DenTypeId } from "@openwork-ee/utils/typeid"
-import { codemodeCodeDigest } from "./codemode-runs.js"
+import { codemodeCodeDigest, parseCodemodeToolCalls } from "./codemode-runs.js"
 import { db } from "./db.js"
 import { parseCodemodeScriptPayload, validateCodemodeScriptInput } from "./mcp/codemode-script-object.js"
 import type { BuiltCodemodeTools } from "./mcp/codemode-tools.js"
@@ -421,7 +421,7 @@ export async function createCodemodeScriptVersion(input: {
     }
     if (current.readOnly !== true) throw new Error(`saved_script_requires_read_only_capabilities:${required.scriptPath}`)
   }
-  for (const call of receipt.tool_calls ?? []) {
+  for (const call of parseCodemodeToolCalls(receipt.tool_calls)) {
     if (!payload.parsed.requiredCapabilities.some((required) => {
       const normalized = call.name.replace(/^tools\./, "")
       return required.scriptPath === call.name || required.scriptPath.replace(/^tools\./, "") === normalized
@@ -625,7 +625,7 @@ export async function saveCodemodeScript(input: {
     [entry.scriptPath.replace(/^tools\./, ""), entry] as const,
   ]))
   const requiredCapabilities: Array<{ capabilityName: string; scriptPath: string }> = []
-  for (const call of receipt.tool_calls ?? []) {
+  for (const call of parseCodemodeToolCalls(receipt.tool_calls)) {
     const resolved = manifestByPath.get(call.name)
     if (!resolved) throw new Error(`saved_script_capability_unavailable:${call.name}`)
     if (resolved.readOnly !== true) throw new Error(`saved_script_requires_read_only_capabilities:${call.name}`)

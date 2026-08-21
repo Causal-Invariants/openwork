@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { AppWindow, Archive, ArrowLeft, Code2, FileText, MoreHorizontal, Pencil, Plus, Server, Store, Terminal, Users, Webhook } from "lucide-react";
+import { Archive, ArrowLeft, Code2, FileText, MoreHorizontal, Pencil, Plus, Server, Store, Terminal, Users, Webhook } from "lucide-react";
 
-import { getNewPluginSkillRoute, getOrgAccessFlags, getPluginSkillRoute, getPluginsRoute, getRemoteMcpAppRoute } from "../../_lib/den-org";
+import { getNewPluginSkillRoute, getOrgAccessFlags, getPluginSkillRoute, getPluginsRoute } from "../../_lib/den-org";
 import { buttonVariants, DenButton } from "../../_components/ui/button";
 import { DenInput } from "../../_components/ui/input";
 import { DenTextarea } from "../../_components/ui/textarea";
@@ -15,7 +15,6 @@ import {
   type PluginHook,
   type PluginMcp,
   type PluginProgram,
-  type PluginRemoteMcpApp,
   type PluginSkill,
   type PluginAgent,
   type PluginCommand,
@@ -31,7 +30,13 @@ import { PluginAccessSection } from "./plugin-access-section";
 import { SavedScriptDetailPanel } from "./saved-script-detail-panel";
 import { useLibrary, type LibraryProgramItem } from "./library-data";
 
-export function PluginDetailScreen({ pluginId }: { pluginId: string }) {
+export function PluginDetailScreen({
+  pluginId,
+  backHref,
+}: {
+  pluginId: string;
+  backHref?: string;
+}) {
   const router = useRouter();
   const { orgContext, orgSlug } = useOrgDashboard();
   const { data: plugin, isLoading, error, refetch } = usePlugin(pluginId);
@@ -103,7 +108,6 @@ export function PluginDetailScreen({ pluginId }: { pluginId: string }) {
   if (plugin.hooks.length === 0) missingLabels.push("hooks");
   if (plugin.mcps.length === 0) missingLabels.push("MCP servers");
   if (plugin.programs.length === 0) missingLabels.push("Programs");
-  if (plugin.apps.length === 0) missingLabels.push("Remote Apps");
 
   async function handleArchivePlugin() {
     try {
@@ -120,7 +124,7 @@ export function PluginDetailScreen({ pluginId }: { pluginId: string }) {
     <div className="mx-auto max-w-[860px] px-6 py-8 md:px-8">
       <div className="mb-6 flex items-center justify-between gap-4">
         <Link
-          href={getPluginsRoute(orgSlug)}
+          href={backHref ?? getPluginsRoute(orgSlug)}
           className="inline-flex items-center gap-1.5 text-[13px] text-gray-400 transition hover:text-gray-700"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -220,16 +224,16 @@ export function PluginDetailScreen({ pluginId }: { pluginId: string }) {
           isLoading={pluginAccessQuery.isLoading}
           error={pluginAccessQuery.error}
         />
-        <SkillsSection orgSlug={orgSlug} plugin={plugin} />
+        <SkillsSection orgSlug={orgSlug} plugin={plugin} canEdit={access.isAdmin} />
         <ProgramsSection
           plugin={plugin}
+          canEdit={access.isAdmin}
           onAdd={() => {
             attachProgram.reset();
             setAddProgramOpen(true);
           }}
           onOpen={(programId) => setSelectedScriptId(programId)}
         />
-        <RemoteMcpAppsSection plugin={plugin} orgSlug={orgSlug} />
         <PrimitiveSection icon={Users} label="Agents" items={plugin.agents} render={renderAgentRow} />
         <PrimitiveSection icon={Terminal} label="Commands" items={plugin.commands} render={renderCommandRow} />
         <PrimitiveSection icon={Webhook} label="Hooks" items={plugin.hooks} render={renderHookRow} />
@@ -496,7 +500,7 @@ function PrimitiveSection<T>({
   );
 }
 
-function SkillsSection({ orgSlug, plugin }: { orgSlug: string | null; plugin: DenPlugin }) {
+function SkillsSection({ orgSlug, plugin, canEdit }: { orgSlug: string | null; plugin: DenPlugin; canEdit: boolean }) {
   return (
     <section>
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -507,10 +511,12 @@ function SkillsSection({ orgSlug, plugin }: { orgSlug: string | null; plugin: De
           </h2>
           <p className="mt-1 text-[12px] text-gray-400">Reusable instructions included in this plugin.</p>
         </div>
-        <Link href={getNewPluginSkillRoute(orgSlug, plugin.id)} className={buttonVariants({ size: "sm" })}>
-          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-          Add skill
-        </Link>
+        {canEdit ? (
+          <Link href={getNewPluginSkillRoute(orgSlug, plugin.id)} className={buttonVariants({ size: "sm" })}>
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            Add skill
+          </Link>
+        ) : null}
       </div>
       {plugin.skills.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 bg-white px-5 py-8 text-center">
@@ -520,7 +526,7 @@ function SkillsSection({ orgSlug, plugin }: { orgSlug: string | null; plugin: De
       ) : (
         <div className="grid gap-2">
           {plugin.skills.map((skill) => (
-            <SkillRow key={skill.id} orgSlug={orgSlug} pluginId={plugin.id} skill={skill} />
+            <SkillRow key={skill.id} orgSlug={orgSlug} pluginId={plugin.id} skill={skill} href={canEdit} />
           ))}
         </div>
       )}
@@ -528,18 +534,34 @@ function SkillsSection({ orgSlug, plugin }: { orgSlug: string | null; plugin: De
   );
 }
 
-function SkillRow({ orgSlug, pluginId, skill }: { orgSlug: string | null; pluginId: string; skill: PluginSkill }) {
-  return (
-    <Link
-      href={getPluginSkillRoute(orgSlug, pluginId, skill.id)}
-      className="block rounded-xl border border-gray-100 bg-white px-4 py-3 transition hover:border-gray-200"
-    >
+function SkillRow({
+  orgSlug,
+  pluginId,
+  skill,
+  href,
+}: {
+  orgSlug: string | null;
+  pluginId: string;
+  skill: PluginSkill;
+  href: boolean;
+}) {
+  const className = "block rounded-xl border border-gray-100 bg-white px-4 py-3 transition hover:border-gray-200";
+  const body = (
+    <>
       <p className="truncate text-[14px] font-semibold tracking-[-0.01em] text-gray-900">{skill.name}</p>
       {skill.description ? (
         <p className="mt-0.5 line-clamp-2 text-[12.5px] leading-[1.55] text-gray-500">{skill.description}</p>
       ) : null}
-    </Link>
+    </>
   );
+  if (href) {
+    return (
+      <Link href={getPluginSkillRoute(orgSlug, pluginId, skill.id)} className={className}>
+        {body}
+      </Link>
+    );
+  }
+  return <div className={className}>{body}</div>;
 }
 
 function renderHookRow(hook: PluginHook) {
@@ -610,7 +632,17 @@ function renderCommandRow(command: PluginCommand) {
   );
 }
 
-function ProgramsSection({ plugin, onAdd, onOpen }: { plugin: DenPlugin; onAdd: () => void; onOpen: (programId: string) => void }) {
+function ProgramsSection({
+  plugin,
+  canEdit,
+  onAdd,
+  onOpen,
+}: {
+  plugin: DenPlugin;
+  canEdit: boolean;
+  onAdd: () => void;
+  onOpen: (programId: string) => void;
+}) {
   return (
     <section>
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -621,7 +653,9 @@ function ProgramsSection({ plugin, onAdd, onOpen }: { plugin: DenPlugin; onAdd: 
           </h2>
           <p className="mt-1 text-[12px] text-gray-400">Reusable Code Mode Programs shared with this Plugin and its collection audiences.</p>
         </div>
-        <DenButton size="sm" onClick={onAdd}><Plus className="h-3.5 w-3.5" aria-hidden />Add Program</DenButton>
+        {canEdit ? (
+          <DenButton size="sm" onClick={onAdd}><Plus className="h-3.5 w-3.5" aria-hidden />Add Program</DenButton>
+        ) : null}
       </div>
       {plugin.programs.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 bg-white px-5 py-8 text-center">
@@ -631,24 +665,6 @@ function ProgramsSection({ plugin, onAdd, onOpen }: { plugin: DenPlugin; onAdd: 
       ) : (
         <div className="grid gap-2">{plugin.programs.map((program) => renderProgramRow(program, () => onOpen(program.id)))}</div>
       )}
-    </section>
-  );
-}
-
-function RemoteMcpAppsSection({ plugin, orgSlug }: { plugin: DenPlugin; orgSlug: string | null }) {
-  if (plugin.apps.length === 0) return null;
-  return (
-    <section>
-      <div className="mb-3">
-        <h2 className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-400">
-          <AppWindow className="h-3.5 w-3.5" />
-          Remote Apps
-        </h2>
-        <p className="mt-1 text-[12px] text-gray-400">Portable MCP Apps installed inside this Plugin and shared with the same audiences.</p>
-      </div>
-      <div className="grid gap-2">
-        {plugin.apps.map((app) => renderRemoteMcpAppRow(app, getRemoteMcpAppRoute(orgSlug, app.id)))}
-      </div>
     </section>
   );
 }
@@ -718,28 +734,6 @@ function renderProgramRow(program: PluginProgram, onOpen: () => void) {
         {program.outputSchema ? " · Validated output" : ""}
       </p>
     </button>
-  );
-}
-
-function renderRemoteMcpAppRow(app: PluginRemoteMcpApp, href: string) {
-  return (
-    <Link
-      key={app.id}
-      href={href}
-      className="block rounded-xl border border-gray-100 bg-white px-4 py-3 transition hover:border-gray-200 hover:bg-gray-50"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="truncate text-[14px] font-semibold tracking-[-0.01em] text-gray-900">{app.name}</p>
-        <span className="rounded-full bg-gray-50 px-2 py-0.5 text-[11px] text-gray-500">
-          Standard MCP App resource
-        </span>
-      </div>
-      {app.description ? <p className="mt-0.5 line-clamp-2 text-[12.5px] leading-[1.55] text-gray-500">{app.description}</p> : null}
-      <p className="mt-2 text-[11px] text-gray-400">
-        {app.version ? `Installed revision ${app.version}` : "Installed revision"}
-        {app.sourceUrl ? " · Cached from a published URL" : ""}
-      </p>
-    </Link>
   );
 }
 

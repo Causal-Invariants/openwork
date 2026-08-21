@@ -5,7 +5,7 @@ import {
   readOrganizationCapabilityOverrides,
 } from "../src/organization-capabilities.js"
 
-const defaultCapabilities = { installLinks: false, mcpConnections: false, codemodeScripts: false, cloud: false }
+const defaultCapabilities = { installLinks: false, mcpConnections: false, codemodeScripts: false, remoteMcpApps: false, cloud: false }
 
 describe("normalizeOrganizationCapabilities", () => {
   test("defaults every capability to false when metadata is empty", () => {
@@ -19,12 +19,13 @@ describe("normalizeOrganizationCapabilities", () => {
     expect(normalizeOrganizationCapabilities({ capabilities: { installLinks: true } })).toEqual({ ...defaultCapabilities, installLinks: true })
     expect(normalizeOrganizationCapabilities({ capabilities: { mcpConnections: true } })).toEqual({ ...defaultCapabilities, mcpConnections: true })
     expect(normalizeOrganizationCapabilities({ capabilities: { codemodeScripts: true } })).toEqual({ ...defaultCapabilities, codemodeScripts: true })
+    expect(normalizeOrganizationCapabilities({ capabilities: { remoteMcpApps: true } })).toEqual({ ...defaultCapabilities, remoteMcpApps: true })
     expect(normalizeOrganizationCapabilities({ capabilities: { cloud: true } })).toEqual({ ...defaultCapabilities, cloud: true })
     expect(normalizeOrganizationCapabilities({ capabilities: { installLinks: false, mcpConnections: false } })).toEqual(defaultCapabilities)
   })
 
   test("reads an explicit opt-in from JSON string metadata", () => {
-    expect(normalizeOrganizationCapabilities(JSON.stringify({ capabilities: { installLinks: true, mcpConnections: true, codemodeScripts: true, cloud: true } }))).toEqual({ installLinks: true, mcpConnections: true, codemodeScripts: true, cloud: true })
+    expect(normalizeOrganizationCapabilities(JSON.stringify({ capabilities: { installLinks: true, mcpConnections: true, codemodeScripts: true, remoteMcpApps: true, cloud: true } }))).toEqual({ installLinks: true, mcpConnections: true, codemodeScripts: true, remoteMcpApps: true, cloud: true })
   })
 
   test("treats anything but literal true as off", () => {
@@ -74,12 +75,14 @@ describe("organizationHasCapability", () => {
     expect(organizationHasCapability(null, "installLinks")).toBe(false)
     expect(organizationHasCapability(null, "mcpConnections")).toBe(false)
     expect(organizationHasCapability(null, "cloud")).toBe(false)
+    expect(organizationHasCapability(null, "remoteMcpApps")).toBe(false)
     expect(organizationHasCapability({ capabilities: {} }, "installLinks")).toBe(false)
     expect(organizationHasCapability({ capabilities: {} }, "mcpConnections")).toBe(false)
     expect(organizationHasCapability({ capabilities: {} }, "cloud")).toBe(false)
     expect(organizationHasCapability({ capabilities: { installLinks: true } }, "installLinks")).toBe(true)
     expect(organizationHasCapability({ capabilities: { mcpConnections: true } }, "mcpConnections")).toBe(true)
     expect(organizationHasCapability({ capabilities: { cloud: true } }, "cloud")).toBe(true)
+    expect(organizationHasCapability({ capabilities: { remoteMcpApps: true } }, "remoteMcpApps")).toBe(true)
     expect(organizationHasCapability(JSON.stringify({ capabilities: { installLinks: true } }), "installLinks")).toBe(true)
     expect(organizationHasCapability(JSON.stringify({ capabilities: { mcpConnections: true } }), "mcpConnections")).toBe(true)
     expect(organizationHasCapability(JSON.stringify({ capabilities: { cloud: true } }), "cloud")).toBe(true)

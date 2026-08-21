@@ -21,6 +21,7 @@
         "tab": "Start here",
         "pages": [
           "start-here/get-started",
+          "start-here/downloads",
           "start-here/migrate-from-claude-cowork",
           {
             "group": "Connect your stack",
@@ -69,6 +70,16 @@
             "group": "Overview",
             "pages": [
               "start-here/self-host"
+            ]
+          },
+          {
+            "group": "Deploy to your cloud",
+            "pages": [
+              "self-host/deploy-to-your-cloud/overview",
+              "self-host/deploy-to-your-cloud/aws",
+              "self-host/deploy-to-your-cloud/azure",
+              "self-host/deploy-to-your-cloud/google-cloud",
+              "self-host/deploy-to-your-cloud/first-administrator"
             ]
           },
           {
@@ -137,6 +148,8 @@
             ]
           },
           "cloud/members-and-rbac",
+          "cloud/sso-okta",
+          "cloud/scim-okta",
           "cloud/sso-microsoft-entra",
           "cloud/scim-microsoft-entra",
           "cloud/security-and-operations",

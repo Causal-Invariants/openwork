@@ -343,6 +343,7 @@ export const ConnectorTargetTable = mysqlTable(
   (table) => [
     index("connector_target_organization_id").on(table.organizationId),
     index("connector_target_connector_type").on(table.connectorType),
+    index("connector_target_type_created_id").on(table.connectorType, table.createdAt, table.id),
     index("connector_target_target_kind").on(table.targetKind),
     uniqueIndex("connector_target_instance_remote_id").on(table.connectorInstanceId, table.remoteId),
   ],

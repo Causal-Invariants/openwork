@@ -3,7 +3,13 @@ import { eq, sql } from "@openwork-ee/den-db/drizzle"
 import { CodemodeRunTable } from "@openwork-ee/den-db/schema"
 import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { codemodeCodeDigest, listCodemodeRuns, recordCodemodeRun, type RecordCodemodeRunInput } from "../src/codemode-runs.js"
+import {
+  codemodeCodeDigest,
+  listCodemodeRuns,
+  parseCodemodeToolCalls,
+  recordCodemodeRun,
+  type RecordCodemodeRunInput,
+} from "../src/codemode-runs.js"
 
 const databaseUrl = "mysql://root:password@127.0.0.1:3306/openwork_test_codemode_runs"
 const database = createDenDb({ databaseUrl, mode: "mysql" }).db
@@ -35,6 +41,12 @@ test("code digest is stable and sha256-prefixed", () => {
   expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/)
 })
 
+test("tool call receipts accept MySQL JSON text and reject malformed entries", () => {
+  expect(parseCodemodeToolCalls('[{"name":"tools.reports.echo"}]')).toEqual([{ name: "tools.reports.echo" }])
+  expect(parseCodemodeToolCalls("[]")).toEqual([])
+  expect(() => parseCodemodeToolCalls('[{}]')).toThrow("codemode_run_tool_calls_invalid")
+})
+
 test("records and lists organization and member-scoped runs", async () => {
   if (!databaseAvailable) return
 
@@ -59,4 +71,5 @@ test("records and lists organization and member-scoped runs", async () => {
   expect(memberRuns).toHaveLength(1)
   expect(memberRuns[0]?.org_membership_id).toBe(firstMemberId)
   expect(memberRuns[0]?.tool_call_count).toBe(1)
+  expect(memberRuns[0]?.tool_calls).toEqual([{ name: "den.getV1Org" }])
 })

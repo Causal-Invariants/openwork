@@ -116,7 +116,8 @@ test("agent MCP server exposes steering instructions during initialize", async (
   await client.connect(transports.client)
 
   expect(client.getInstructions()).toBe(agentModule.AGENT_MCP_INSTRUCTIONS)
-  expect(client.getInstructions()).toContain("search_capabilities and execute_capability")
+  expect(client.getInstructions()).toContain("Use create_skill")
+  expect(client.getInstructions()).toContain("do not route this flow through execute_capability or postPlugins")
   expect(client.getInstructions()).toContain("create-skill")
   expect(client.getInstructions()).toContain("share-plugin")
   expect(client.getInstructions()).toContain("add-to-marketplace")
@@ -178,10 +179,11 @@ test("built-in cloud skills are searchable and executable as skill capabilities"
     provenance: "Built into OpenWork Cloud.",
   })
   expect(createSkill?.content).toContain("name: create-skill")
-  expect(createSkill?.content).toContain("postPlugins")
-  expect(createSkill?.content).toContain("409 duplicate_plugin")
+  expect(createSkill?.content).toContain("openwork-cloud_create_skill")
+  expect(createSkill?.content).toContain("Do not route this flow through `execute_capability` or `postPlugins`")
+  expect(createSkill?.content).toContain("`duplicate_plugin`")
   expect(createSkill?.content).toContain("share-plugin")
-  expect(createSkill?.content).toContain("Do not send `marketplaceId` or `orgWide`")
+  expect(createSkill?.content).toContain("Do not attach it to a marketplace or grant org-wide access")
   expect(createSkill?.content).not.toContain("Set organization-wide access or a marketplace")
 
   const addToMarketplace = executeBuiltinSkillCapability(BUILTIN_ADD_TO_MARKETPLACE_CAPABILITY)

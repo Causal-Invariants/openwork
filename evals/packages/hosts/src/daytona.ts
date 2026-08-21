@@ -270,8 +270,38 @@ async function orgModeOrDefault(webUrl: string, log: (msg: string) => void): Pro
   }
 }
 
-export async function checkedExec(exec: DaytonaExec, args: string[], context: string, opts: { input?: string; timeoutMs?: number } = {}): Promise<DaytonaExecResult> {
-  const result = await exec(args, opts);
+/**
+ * Daytona CLI transport failures print `level=fatal msg="..."` (HTML error
+ * pages, EOFs, resets from the Daytona API) and mean the remote command never
+ * executed, so retrying is always safe. Remote command failures — a non-zero
+ * exit without a CLI fatal transport message — are never retried.
+ */
+const TRANSIENT_DAYTONA_CLI_MESSAGES = [
+  /invalid character '<'/i,
+  /unexpected EOF/i,
+  /^EOF$/,
+  /unexpected end of JSON input/i,
+  /connection reset/i,
+  /bad gateway/i,
+  /service unavailable/i,
+  /too many requests/i,
+];
+
+function transientDaytonaCliFailure(result: DaytonaExecResult): boolean {
+  if (result.code === 0) return false;
+  const fatalMessages = [...`${result.stderr}\n${result.stdout}`.matchAll(/level=fatal msg="((?:[^"\\]|\\.)*)"/g)]
+    .map((match) => match[1]);
+  return fatalMessages.some((message) => TRANSIENT_DAYTONA_CLI_MESSAGES.some((pattern) => pattern.test(message)));
+}
+
+export async function checkedExec(exec: DaytonaExec, args: string[], context: string, opts: { input?: string; timeoutMs?: number; retryDelayMs?: number } = {}): Promise<DaytonaExecResult> {
+  const attempts = 3;
+  const { retryDelayMs, ...execOpts } = opts;
+  let result = await exec(args, execOpts);
+  for (let attempt = 1; attempt < attempts && transientDaytonaCliFailure(result); attempt += 1) {
+    await setTimeout(retryDelayMs ?? attempt * 2_000);
+    result = await exec(args, execOpts);
+  }
   if (result.code !== 0) {
     const stderr = result.stderr.trim();
     const stdout = result.stdout.trim();

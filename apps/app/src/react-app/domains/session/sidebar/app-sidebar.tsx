@@ -163,6 +163,27 @@ interface SessionLoadingIndicatorProps {
   isActiveWork: boolean;
 }
 
+function ShowMoreSessionsButton({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <SidebarMenuSubItem>
+      <SidebarMenuSubButton
+        className="h-8 text-[13px] text-muted-foreground"
+        style={{ paddingInlineStart: sidebarRowPaddingInlineStart(0) }}
+        onClick={onClick}
+      >
+        <SidebarGlyphSlot />
+        <span className="truncate">{label}</span>
+      </SidebarMenuSubButton>
+    </SidebarMenuSubItem>
+  );
+}
+
 /** Glyph-lane activity only — never used for unread / completion. */
 function SessionLoadingIndicator({ status, isActiveWork }: SessionLoadingIndicatorProps) {
   if (!isActiveWork) return <SidebarGlyphSlot />;
@@ -765,7 +786,7 @@ function SidebarSplitPill({ workspaceSessionGroups, selectedWorkspaceId, selecte
 
   return (
     <div className="px-2 pb-1">
-      <div className="mb-1 flex items-center gap-1 px-1 text-[12px] font-medium uppercase tracking-wide text-sidebar-foreground/50">
+      <div className="mb-1 flex h-8 items-center gap-1 px-1 text-[12px] font-normal text-muted-foreground">
         <Columns2 className="size-3" />
         {t("session_management.split_view")}
       </div>
@@ -1113,7 +1134,7 @@ export function AppSidebar(props: AppSidebarProps) {
             </Button>
           </div>
         ) : null}
-        <SidebarHeader className="pb-0 pe-0">
+        <SidebarHeader className="mb-0 mt-2">
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -1124,7 +1145,7 @@ export function AppSidebar(props: AppSidebarProps) {
                 disabled={props.newTaskDisabled}
                 onClick={() => props.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
               >
-                <SquarePen />
+                <SquarePen className="size-4" />
                 <span className="flex-1 truncate">{t("session.new_task")}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -1186,12 +1207,12 @@ export function AppSidebar(props: AppSidebarProps) {
             data-slot="sidebar-content"
             data-sidebar="content"
             data-session-number-modifier-held={props.sessionNumberShortcuts.modifierHeld ? "true" : undefined}
-            className="no-scrollbar flex min-h-0 flex-1 flex-col gap-px overflow-auto [--radius:var(--radius-xl)] group-data-[collapsible=icon]:overflow-hidden"
+            className="no-scrollbar flex min-h-0 flex-1 flex-col gap-0 overflow-auto [--radius:var(--radius-md)] group-data-[collapsible=icon]:overflow-hidden"
           >
             {pinnedSessions.length > 0 ? (
               <GlobalPinnedSessions entries={pinnedSessions} />
             ) : null}
-            <div className={cn("group/workspaces-header flex items-center pb-1 pr-2 pt-1", SIDEBAR_SECTION_LANE)}>
+            <div className={cn("group/workspaces-header flex h-6 items-center mt-4", SIDEBAR_SECTION_LANE)}>
               <span className={SIDEBAR_SECTION_LABEL}>
                 {t("workspace_list.title")}
               </span>
@@ -1212,7 +1233,7 @@ export function AppSidebar(props: AppSidebarProps) {
               axis="y"
               values={props.workspaceSessionGroups.map((group) => group.workspace.id)}
               onReorder={(workspaceIds) => props.onReorderWorkspaces?.(workspaceIds)}
-              className="flex flex-col gap-px"
+              className="flex flex-col gap-0.5"
             >
               {props.workspaceSessionGroups.map((group, index) => (
                 <WorkspaceReorderItem
@@ -1255,17 +1276,14 @@ type GlobalPinnedSessionEntry = {
 
 function GlobalPinnedSessions({ entries }: { entries: GlobalPinnedSessionEntry[] }) {
   return (
-    <SidebarGroup data-global-pinned-sessions className="pb-1 pe-0 pt-2">
+    <SidebarGroup data-global-pinned-sessions className="pb-0 pt-4">
       <SidebarGroupContent>
-        <div className={cn("flex items-center gap-2 pb-1 pr-3", SIDEBAR_ROW_LANE)}>
-          <SidebarGlyphSlot>
-            <Pin className="size-3 text-muted-foreground" />
-          </SidebarGlyphSlot>
+        <div className="flex h-6 items-center pe-2 ps-2.5">
           <span className={SIDEBAR_SECTION_LABEL}>{t("session_management.pinned")}</span>
         </div>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuSub className="gap-1">
+            <SidebarMenuSub>
               {entries.map((entry) => (
                 <GlobalPinnedSessionTree
                   key={`${entry.group.workspace.id}:${entry.sessionId}`}
@@ -1290,17 +1308,17 @@ function GlobalArchivedSessions({ entries }: { entries: GlobalArchivedSessionEnt
   const [expanded, setExpanded] = React.useState(false);
 
   return (
-    <SidebarGroup data-global-archived-sessions className="pb-1 pe-0 pt-1">
+    <SidebarGroup data-global-archived-sessions className="mt-4 pb-1 pt-0">
       <SidebarGroupContent>
         <Collapsible open={expanded} onOpenChange={setExpanded} className="group/archived">
           <CollapsibleTrigger
             render={
               <button
                 type="button"
-                className={cn("group/separator flex w-full cursor-pointer items-center gap-2 pe-2 pb-1 pt-2.5 rounded transition-colors hover:bg-sidebar-accent/50", SIDEBAR_ROW_LANE)}
+                className={cn("group/separator flex h-6 w-full cursor-pointer items-center gap-2 pe-2 rounded-md transition-colors hover:bg-sidebar-accent/50", SIDEBAR_ROW_LANE)}
               >
                 <SidebarGlyphSlot>
-                  <Archive className="size-3 text-muted-foreground" />
+                  <Archive className="size-3.5 text-muted-foreground" />
                 </SidebarGlyphSlot>
                 <span className={SIDEBAR_SECTION_LABEL}>
                   {t("session_management.archived_label")}
@@ -1313,7 +1331,7 @@ function GlobalArchivedSessions({ entries }: { entries: GlobalArchivedSessionEnt
           <CollapsibleContent>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuSub className="gap-1">
+                <SidebarMenuSub>
                   {entries.map((entry) => (
                     <GlobalArchivedSessionItem
                       key={`${entry.group.workspace.id}:${entry.session.id}`}
@@ -1588,7 +1606,7 @@ function WorkspaceSidebarGroup({
     : t("workspace_list.show_more_fallback");
 
   return (
-    <SidebarGroup className={cn(className, "pe-0")}>
+    <SidebarGroup className={className}>
       <SidebarGroupContent>
         <SidebarMenu>
           <Collapsible
@@ -1646,7 +1664,7 @@ function WorkspaceSidebarGroup({
             </div>
 
             <CollapsibleContent className="pt-px">
-              <SidebarMenuSub className="gap-1">
+              <SidebarMenuSub>
                 {showRemoteConnectionIssue ? (
                   <RemoteConnectionIssueCard
                     message={connectionIssueMessage}
@@ -1687,7 +1705,7 @@ function WorkspaceSidebarGroup({
                           const full = [...ids, ...allRootIds.filter((id) => !visible.has(id))];
                           store.getState().reorderSessions(workspace.id, full);
                         }}
-                        className="flex flex-col gap-1"
+                        className="flex flex-col gap-0.5"
                       >
                         {sessionRows.map((row) => (
                           <SessionMenuItem
@@ -1704,14 +1722,10 @@ function WorkspaceSidebarGroup({
                       </Reorder.Group>
                     )}
                     {wsGroups.length === 0 && activeRootCount > previewCount ? (
-                      <SidebarMenuSubItem>
-                        <SidebarMenuSubButton
-                          className="text-muted-foreground text-xs"
-                          onClick={() => showMoreSessions(workspace.id, activeRootCount)}
-                        >
-                          <span className="truncate">{showMoreLabel}</span>
-                        </SidebarMenuSubButton>
-                      </SidebarMenuSubItem>
+                      <ShowMoreSessionsButton
+                        label={showMoreLabel}
+                        onClick={() => showMoreSessions(workspace.id, activeRootCount)}
+                      />
                     ) : null}
                   </>
                 ) : group.status === "error" ? (
@@ -1938,7 +1952,7 @@ function SessionGroupSeparator({ label, count, expanded, onToggle, group, groups
         event.preventDefault();
         onToggle();
       }}
-      className={cn("group/separator flex w-full items-center gap-2 rounded pe-2 pb-1 pt-2.5 text-left transition-colors first:pt-1 hover:bg-sidebar-accent/50")}
+      className={cn("group/separator flex h-8 w-full items-center gap-2 rounded-md pe-2 text-left transition-colors hover:bg-sidebar-accent/50")}
       style={{ paddingInlineStart: sidebarRowPaddingInlineStart(0) }}
       aria-expanded={expanded}
     >
@@ -2105,7 +2119,7 @@ function GroupedSessionList({ sessionRows, groups, assignments, pinnedIds, tree,
         axis="y"
         values={groups.map((group) => group.id)}
         onReorder={(ids) => store.getState().reorderGroups(workspaceId, ids)}
-        className="flex flex-col"
+        className="flex flex-col gap-0.5"
       >
         {groups.map(renderGroup)}
       </Reorder.Group>
@@ -2135,7 +2149,7 @@ function GroupedSessionList({ sessionRows, groups, assignments, pinnedIds, tree,
                   const full = allRootIds.map((id) => ungroupedSet.has(id) ? fullUngrouped[ui++] : id);
                   store.getState().reorderSessions(workspaceId, full);
                 }}
-                className="flex flex-col gap-1"
+                className="flex flex-col gap-0.5"
               >
                 {visibleUngroupedRows.map((row) => (
                   <React.Fragment key={row.session.id}>
@@ -2153,16 +2167,10 @@ function GroupedSessionList({ sessionRows, groups, assignments, pinnedIds, tree,
                 ))}
               </Reorder.Group>
               {ungroupedRemaining > 0 ? (
-                <SidebarMenuSubItem>
-                  <SidebarMenuSubButton
-                    className="text-muted-foreground text-xs"
-                    onClick={() => showMoreInGroup(UNGROUPED_GROUP_ID, ungroupedRows.length)}
-                  >
-                    <span className="truncate">
-                      {t("workspace_list.show_more", { count: Math.min(MAX_SESSIONS_PREVIEW, ungroupedRemaining) })}
-                    </span>
-                  </SidebarMenuSubButton>
-                </SidebarMenuSubItem>
+                <ShowMoreSessionsButton
+                  label={t("workspace_list.show_more", { count: Math.min(MAX_SESSIONS_PREVIEW, ungroupedRemaining) })}
+                  onClick={() => showMoreInGroup(UNGROUPED_GROUP_ID, ungroupedRows.length)}
+                />
               ) : null}
             </CollapsibleContent>
           </Collapsible>
@@ -2213,22 +2221,16 @@ function SessionGroupSection({ group, rows, expanded, workspaceId, store, render
             workspaceId={workspaceId}
             onTitlePointerDown={(event) => dragControls.start(event)}
           />
-          <CollapsibleContent className="flex flex-col gap-1">
+          <CollapsibleContent className="flex flex-col gap-0.5">
             {visibleRows.length > 0
               ? (
                 <>
                   {visibleRows.map(renderRow)}
                   {remaining > 0 ? (
-                    <SidebarMenuSubItem>
-                      <SidebarMenuSubButton
-                        className="text-muted-foreground text-xs"
-                        onClick={onShowMore}
-                      >
-                        <span className="truncate">
-                          {t("workspace_list.show_more", { count: Math.min(MAX_SESSIONS_PREVIEW, remaining) })}
-                        </span>
-                      </SidebarMenuSubButton>
-                    </SidebarMenuSubItem>
+                    <ShowMoreSessionsButton
+                      label={t("workspace_list.show_more", { count: Math.min(MAX_SESSIONS_PREVIEW, remaining) })}
+                      onClick={onShowMore}
+                    />
                   ) : null}
                 </>
               )
@@ -2354,7 +2356,7 @@ function SessionMenuItem({
     // Soft pill @ 11px radius from Paper; overlay tint adapts to theme
     // (light: --ow-light-hover ≈ black/5, dark: #FFFFFF17 ≈ white/9).
     // Nesting uses inline padding so each depth level steps 12px (not a binary nest).
-    "relative rounded-[11px] transition-[padding,background-color] duration-75 pe-7 group-hover/menu-sub-item:pe-18 group-has-data-popup-open/menu-sub-item:pe-18 group-hover/menu-sub-item:bg-black/[0.05] dark:group-hover/menu-sub-item:bg-white/[0.09] data-active:bg-black/[0.07] dark:data-active:bg-white/[0.12] text-sidebar-foreground/80 data-active:text-sidebar-foreground",
+    "relative h-8 rounded-md transition-[padding,background-color] duration-75 pe-7 group-hover/menu-sub-item:pe-18 group-has-data-popup-open/menu-sub-item:pe-18 group-hover/menu-sub-item:bg-black/[0.05] dark:group-hover/menu-sub-item:bg-white/[0.09] data-active:bg-black/[0.07] dark:data-active:bg-white/[0.12] text-[13px] text-sidebar-foreground/80 data-active:text-sidebar-foreground",
   );
   const rowButtonStyle = {
     paddingInlineStart: sidebarRowPaddingInlineStart(visualDepth),

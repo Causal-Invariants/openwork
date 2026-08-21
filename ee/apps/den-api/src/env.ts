@@ -1,4 +1,5 @@
 import os from "node:os"
+import { readFileSync } from "node:fs"
 import path from "node:path"
 import { DEN_WORKER_POLL_INTERVAL_MS } from "./CONSTS.js"
 import { normalizeConfiguredPublicApiBaseUrl } from "./request-url.js"
@@ -87,6 +88,8 @@ const EnvSchema = z.object({
   DEN_MARKETING_URL: z.string().optional(),
   DEN_MCP_CLAIM_NAMESPACE: z.string().optional(),
   DEN_BOOTSTRAP_ADMIN_EMAILS: z.string().optional(),
+  DEN_INITIAL_ADMIN_BOOTSTRAP_CODE: z.string().optional(),
+  DEN_INITIAL_ADMIN_BOOTSTRAP_CODE_FILE: z.string().optional(),
   WORKER_PROXY_PORT: z.string().optional(),
   WORKER_PROVISIONING_RECONCILE_INTERVAL_MS: z.string().optional(),
   WORKER_PROVISIONING_RECONCILE_STALE_MS: z.string().optional(),
@@ -236,6 +239,18 @@ function automationTuning(value: string | undefined, fallback: number) {
 function optionalString(value: string | undefined) {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
+}
+
+function readOptionalSecretFile(envName: string, pathValue: string | undefined) {
+  const filePath = optionalString(pathValue)
+  if (!filePath) {
+    return undefined
+  }
+  try {
+    return readFileSync(filePath, "utf8").trim()
+  } catch {
+    throw new Error(`${envName} must point to a readable file`)
+  }
 }
 
 export type DenOrgMode = "single_org" | "multi_org"
@@ -422,6 +437,8 @@ if (connectLinkMode === "signed" && (!connectLinkPrivateKeyPem || !connectLinkKi
     "DEN_CONNECT_LINK_MODE=signed requires DEN_CONNECT_LINK_PRIVATE_KEY and DEN_CONNECT_LINK_KEY_ID.",
   )
 }
+const initialAdminBootstrapCode = optionalString(parsed.DEN_INITIAL_ADMIN_BOOTSTRAP_CODE)
+  ?? readOptionalSecretFile("DEN_INITIAL_ADMIN_BOOTSTRAP_CODE_FILE", parsed.DEN_INITIAL_ADMIN_BOOTSTRAP_CODE_FILE)
 const connectLink = connectLinkMode === "signed" && connectLinkPrivateKeyPem && connectLinkKid
   ? { privateKeyPem: connectLinkPrivateKeyPem, kid: connectLinkKid }
   : null
@@ -439,10 +456,10 @@ const mcpConnectionsGatingEnabled =
 const generatedArtifactViewsEnabled =
   (parsed.DEN_GENERATED_ARTIFACT_VIEWS_ENABLED ?? "false").trim().toLowerCase() === "true"
 
-// Imported apps use the released stable Desktop MCP Apps bridge and remain
-// independently disableable without enabling agent-authored generated views.
+// Native and imported MCP Apps require an explicit deployment opt-in plus an
+// explicit organization capability. Missing configuration always fails closed.
 const remoteMcpAppsEnabled =
-  (parsed.DEN_REMOTE_MCP_APPS_ENABLED ?? "true").trim().toLowerCase() === "true"
+  (parsed.DEN_REMOTE_MCP_APPS_ENABLED ?? "false").trim().toLowerCase() === "true"
 
 const devMode = (parsed.OPENWORK_DEV_MODE ?? "0").trim() === "1"
 const botIdProtectionEnabled = (parsed.DEN_BOTID_PROTECTION_ENABLED ?? "0").trim() === "1"
@@ -628,6 +645,7 @@ export const env = {
   marketingUrl: optionalString(parsed.DEN_MARKETING_URL),
   mcpClaimNamespace: normalizeOrigin(optionalString(parsed.DEN_MCP_CLAIM_NAMESPACE) ?? parsed.BETTER_AUTH_URL),
   bootstrapAdminEmails: splitCsv(parsed.DEN_BOOTSTRAP_ADMIN_EMAILS).map((email) => email.toLowerCase()),
+  initialAdminBootstrapCode,
   provisionerMode: parsed.PROVISIONER_MODE ?? "stub",
   workerProvisioningReconcileIntervalMs: Number(parsed.WORKER_PROVISIONING_RECONCILE_INTERVAL_MS ?? "60000"),
   workerProvisioningReconcileStaleMs: Number(parsed.WORKER_PROVISIONING_RECONCILE_STALE_MS ?? "1200000"),

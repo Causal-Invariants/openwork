@@ -24,6 +24,15 @@ catalogs:
     react-dom: 18.2.0
 linkWorkspacePackages: true
 preferWorkspacePackages: true
+supportedArchitectures:
+  # Release jobs cross-package the second CPU architecture on the current OS.
+  # Keeping both optional-native variants makes those artifacts runnable while
+  # avoiding the cost of installing optional dependencies for other OSes.
+  os:
+    - current
+  cpu:
+    - x64
+    - arm64
 overrides:
   "@babel/code-frame@<7.29.6": 7.29.7
   "@babel/compat-data@<7.29.6": 7.29.7

@@ -95,6 +95,36 @@ function base64AfterEcho(call: ExecCall): string {
   return call.args[echoIndex + 1] ?? "";
 }
 
+test("checkedExec retries when the Daytona CLI fails at the transport layer", async () => {
+  let callCount = 0;
+  const exec: DaytonaExec = async () => {
+    callCount += 1;
+    if (callCount < 3) {
+      return {
+        stdout: "",
+        stderr: `time="2026-08-18T19:35:11Z" level=fatal msg="invalid character '<' looking for beginning of value"\n`,
+        code: 1,
+      };
+    }
+    return { stdout: "done\n", stderr: "", code: 0 };
+  };
+
+  const result = await checkedExec(exec, ["exec"], "write Daytona Electron bootstrap", { retryDelayMs: 1 });
+  assert.equal(result.stdout, "done\n");
+  assert.equal(callCount, 3);
+});
+
+test("checkedExec does not retry remote command failures", async () => {
+  let callCount = 0;
+  const exec: DaytonaExec = async () => {
+    callCount += 1;
+    return { stdout: "", stderr: "rm: cannot remove '/tmp/gone'\n", code: 1 };
+  };
+
+  await assert.rejects(checkedExec(exec, ["exec"], "cleanup profile", { retryDelayMs: 1 }));
+  assert.equal(callCount, 1);
+});
+
 test("checkedExec reports stderr and stdout from a failed Daytona command", async () => {
   const exec: DaytonaExec = async () => ({
     stdout: "remote process log\n",

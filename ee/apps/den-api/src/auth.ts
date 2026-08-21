@@ -61,6 +61,7 @@ import {
   ORGANIZATION_SAML_DEPRECATED_ALGORITHM_BEHAVIOR,
   ORGANIZATION_SAML_REQUIRE_TIMESTAMPS,
 } from "./sso-saml-policy.js";
+import { SSO_DOMAIN_VERIFICATION_TOKEN_PREFIX } from "./sso-domain-verification.js";
 import {
   getOrganizationContextForUser,
   listAssignableRoles,
@@ -73,7 +74,9 @@ import {
   findEnterpriseAuthRequirementForEmail,
   findEnterpriseAuthRequirementForUserId,
 } from "./enterprise-auth-requirement.js";
+import { normalizeLoginEmail } from "./auth-login-options.js";
 import { getAuthBodyEmail, getSingleOrgEmailSignupPolicyViolation } from "./single-org-signup-policy.js";
+import { readInitialAdminBootstrapGrantFromBody } from "./initial-admin-bootstrap.js";
 import { createDenTypeId, normalizeDenTypeId } from "@openwork-ee/utils/typeid";
 import * as schema from "@openwork-ee/den-db/schema";
 import { apiKey } from "@better-auth/api-key";
@@ -531,7 +534,7 @@ async function getOrganizationMemberRole(input: {
   organizationId: string;
   userId: string;
 }) {
-  const member = await getOrganizationContextForUser({
+  const member = await cache.org.membership({
     organizationId: normalizeDenTypeId("organization", input.organizationId),
     userId: normalizeDenTypeId("user", input.userId),
   });
@@ -539,8 +542,8 @@ async function getOrganizationMemberRole(input: {
     return null;
   }
   return {
-    role: member.currentMember.role,
-    isOwner: member.currentMember.isOwner,
+    role: member.role,
+    isOwner: member.isOwner,
   };
 }
 
@@ -578,9 +581,26 @@ export const auth = betterAuth({
   },
   databaseHooks: {
     user: {
+      create: {
+        before: async (user) => ({
+          data: {
+            ...user,
+            email: normalizeLoginEmail(user.email),
+          },
+        }),
+      },
       update: {
+        before: async (user) => ({
+          data: typeof user.email === "string"
+            ? {
+              ...user,
+              email: normalizeLoginEmail(user.email),
+            }
+            : user,
+        }),
         after: async (user) => {
           if (typeof user.id === "string") {
+            // User profile changes can stale cached auth payloads; clear all sessions here.
             await cache.auth.deleteSessionsForUser(normalizeDenTypeId("user", user.id));
           }
         },
@@ -633,14 +653,22 @@ export const auth = betterAuth({
       update: {
         after: async (session) => {
           if (typeof session.token === "string") {
+            // Better Auth session updates are the explicit invalidation point for cached sessions.
             await cache.auth.deleteSession(session.token);
+          }
+          if (typeof session.id === "string") {
+            await cache.auth.deleteSessionId(normalizeDenTypeId("session", session.id));
           }
         },
       },
       delete: {
         after: async (session) => {
           if (typeof session.token === "string") {
-            await cache.auth.deleteSession(session.token);
+            // Sign-out deletes the backing session row, so cached hits must be cleared here.
+            await cache.auth.revokeSession(session.token);
+          }
+          if (typeof session.id === "string") {
+            await cache.auth.revokeSessionId(normalizeDenTypeId("session", session.id));
           }
         },
       },
@@ -755,7 +783,8 @@ export const auth = betterAuth({
           invitationIdOrToken: readRequestQueryParam(ctx.request, "invite") ?? readStringProperty(ctx.query, "invite") ?? readStringProperty(ctx.body, "invite"),
           email,
         });
-        const violation = invitationAllowsSignup ? null : await getSingleOrgEmailSignupPolicyViolation(email);
+        const bootstrapGrant = readInitialAdminBootstrapGrantFromBody(ctx.body);
+        const violation = invitationAllowsSignup || bootstrapGrant ? null : await getSingleOrgEmailSignupPolicyViolation(email);
         if (violation) {
           throw new APIError("FORBIDDEN", { message: violation.message });
         }
@@ -801,7 +830,8 @@ export const auth = betterAuth({
       }
 
       await ctx.context.internalAdapter.deleteSession(newSession.session.token);
-      await cache.auth.deleteSession(newSession.session.token);
+      // Enterprise auth rejection deletes the just-created session outside hooks in some adapters.
+      await cache.auth.revokeSession(newSession.session.token);
       deleteSessionCookie(ctx);
       throw ctx.redirect(getEnterpriseAuthRedirectUrl({
         signInPath: requirement.signInPath,
@@ -862,6 +892,14 @@ export const auth = betterAuth({
             return createDenTypeId("organizationRole");
           case "scimProvider":
             return createDenTypeId("scimProvider");
+          case "scimGroup":
+            return createDenTypeId("scimGroup");
+          case "scimGroupMember":
+            return createDenTypeId("scimGroupMember");
+          case "scimGroupRole":
+            return createDenTypeId("scimGroupRole");
+          case "scimGroupRoleGrant":
+            return createDenTypeId("scimGroupRoleGrant");
           case "ssoProvider":
             return createDenTypeId("ssoProvider");
           case "ssoConnection":
@@ -896,6 +934,7 @@ export const auth = betterAuth({
         window: 300,
         max: 10,
       },
+      "/oauth2/token": false,
       "/request-password-reset": {
         window: 3600,
         max: 5,
@@ -1163,6 +1202,7 @@ export const auth = betterAuth({
       provisionUserOnEveryLogin: true,
       domainVerification: {
         enabled: true,
+        tokenPrefix: SSO_DOMAIN_VERIFICATION_TOKEN_PREFIX,
       },
       organizationProvisioning: {
         disabled: false,

@@ -4,6 +4,7 @@ import test from "node:test";
 import { denFetch } from "@openwork/behaviors";
 import { faultProxy } from "../src/faults.ts";
 import type { Server } from "node:http";
+import type { Place } from "../src/place.ts";
 
 function listen(server: Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -45,7 +46,7 @@ test("faultProxy consumes status and latency rules before passing through", asyn
       apiUrl: `http://127.0.0.1:${port}`,
       webUrl: `http://127.0.0.1:${port}`,
     });
-    proxy.faults.status("/api/den/flaky", 429, { times: 2, body: { error: "slow down" } });
+    await proxy.faults.status("/api/den/flaky", 429, { times: 2, body: { error: "slow down" } });
 
     const first = await fetch(`${proxy.ref.webUrl}/api/den/flaky`);
     const second = await fetch(`${proxy.ref.webUrl}/api/den/flaky`);
@@ -58,7 +59,7 @@ test("faultProxy consumes status and latency rules before passing through", asyn
     assert.equal(passed.headers.get("x-upstream"), "yes");
     assert.deepEqual(await passed.json(), { method: "GET", path: "/api/den/flaky" });
 
-    proxy.faults.latency("/delayed", 25);
+    await proxy.faults.latency("/delayed", 25);
     const startedAt = Date.now();
     const delayed = await fetch(`${proxy.ref.webUrl}/delayed`);
     assert.equal(delayed.status, 200);
@@ -79,6 +80,8 @@ test("faultProxy consumes status and latency rules before passing through", asyn
         { path: "/api/den/behavior", status: 200, faulted: false },
       ],
     );
+    assert.deepEqual(await proxy.requestLog(), proxy.requests);
+    assert.notEqual(await proxy.requestLog(), proxy.requests);
   } finally {
     await close(upstream);
   }
@@ -95,14 +98,32 @@ test("faultProxy clear removes pending rules", async () => {
       apiUrl: `http://127.0.0.1:${port}`,
       webUrl: `http://127.0.0.1:${port}`,
     });
-    proxy.faults.status("/", 500, { times: 3 });
-    proxy.faults.clear();
+    await proxy.faults.status("/", 500, { times: 3 });
+    await proxy.faults.clear();
 
     assert.equal((await fetch(proxy.ref.webUrl)).status, 204);
     assert.equal(proxy.requests[0]?.faulted, false);
   } finally {
     await close(upstream);
   }
+});
+
+test("faultProxy requires the Den sandbox id for Daytona placement", async () => {
+  const place: Place = {
+    kind: "daytona",
+    host: () => undefined,
+    db: async () => { throw new Error("unused"); },
+    exposeMock: async () => { throw new Error("unused"); },
+    denBase: () => ({ kind: "daytona", ref: "dev" }),
+  };
+
+  await assert.rejects(
+    faultProxy(
+      { apiUrl: "https://den-api.example.test", webUrl: "https://den.example.test" },
+      { place, sandbox: undefined },
+    ),
+    /fault proxy on Daytona needs the Den sandbox id; pass `sandbox: den\.placement\.sandboxId`/,
+  );
 });
 
 test("faultProxy pins absolute-form request targets to its upstream", async () => {

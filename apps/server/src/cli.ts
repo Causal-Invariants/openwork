@@ -151,7 +151,12 @@ if (!config.opencodeBaseUrl && process.env.OPENWORK_MANAGE_OPENCODE === "1") {
 // workspace's runtime-DB MCPs into the engine so they aren't invisible
 // until a manual reload. Best-effort.
 if (managedOpencode) {
-  void syncAllWorkspacesRuntimeMcpToEngine(config);
+  void syncAllWorkspacesRuntimeMcpToEngine(config).catch((error) => {
+    logger.log("error", "Startup MCP synchronization crashed.", {
+      "mcp.trigger": "startup",
+      "mcp.failure.message": error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 const url = `http://${config.host}:${server.port}`;

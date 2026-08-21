@@ -27,14 +27,9 @@ description: |
 
 Create exactly one new Cloud skill. It is immediately usable by its creator. Do not attach it to a marketplace or grant org-wide access in this flow.
 
-## Fast path (prefer these exact MCP names)
+## Fast path
 
-Call \`openwork-cloud_execute_capability\` with these names. Skip broad search unless a call returns \`unknown_capability\`.
-
-| Step | Capability | Call |
-| --- | --- | --- |
-| Create | \`postPlugins\` | body below |
-| Verify | \`getPluginsResolved\` | path \`{ "pluginId": "<id>" }\` |
+Call the direct MCP tool \`create_skill\` (projected as \`openwork-cloud_create_skill\` in OpenWork Desktop). Do not route this flow through \`execute_capability\` or \`postPlugins\`.
 
 Optional pre-check only when a same-named skill may already exist: \`getConfigObjects\` with query \`{ "type": "skill", "q": "<skill-name>" }\`.
 
@@ -51,18 +46,15 @@ Produce one complete \`SKILL.md\` with:
 ## Workflow
 
 1. Draft the complete \`SKILL.md\`.
-2. Execute \`postPlugins\` with body:
+2. Execute \`create_skill\` with:
    \`\`\`json
    {
-     "name": "<plugin title>",
-     "components": [
-       { "type": "skill", "input": { "rawSourceText": "<complete SKILL.md>" } }
-     ]
+     "pluginName": "<plugin title>",
+     "skillMarkdown": "<complete SKILL.md>"
    }
    \`\`\`
-   Do not send \`marketplaceId\` or \`orgWide\`.
-3. Execute \`getPluginsResolved\` with the returned plugin id. Report plugin id, skill/config-object id, and that the skill is ready to use now.
-4. On a \`409 duplicate_plugin\` response from \`postPlugins\`, report the existing plugin id from the message and offer to update that skill through \`postConfigObjectsVersions\` with path \`{ "configObjectId": "<id>" }\` instead of creating a duplicate.
+3. Use the returned plugin id and skill id to report that the skill is ready to use now. Compatible clients render the skill-created App automatically; do not replace it with emoji confirmation Markdown.
+4. On a \`duplicate_plugin\` response, report the existing plugin id from the message and offer to update that skill through \`postConfigObjectsVersions\` with path \`{ "configObjectId": "<id>" }\` instead of creating a duplicate.
 5. On authorization or validation errors, report them. Do not fall back to a workspace-local skill unless the user explicitly asks for one.
 6. After reporting that the skill is ready, offer to share it with a person or team. If accepted, execute and follow the \`share-plugin\` skill.
 `

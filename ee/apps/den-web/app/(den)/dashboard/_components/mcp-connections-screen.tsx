@@ -61,7 +61,6 @@ import {
   useReviewMcpIssuer,
   useSaveNativeProviderClient,
   useStartMcpConnectionOAuth,
-  useTelegramConnection,
   useUpdateMcpConnection,
 } from "./mcp-connections-data";
 import {
@@ -75,12 +74,10 @@ import {
   toggleAllOptionalScopes,
 } from "./mcp-scope-selection";
 import { getPluginPartsSummary, pluginQueryKeys, usePlugins } from "./plugin-data";
-import { TelegramDialog } from "./telegram-dialog";
 import {
   ConnectorQuickAddGrid,
   GOOGLE_WORKSPACE_QUICK_ADD_ID,
   MICROSOFT_365_QUICK_ADD_ID,
-  TELEGRAM_QUICK_ADD_ID,
 } from "./connector-quick-add-grid";
 
 const OAUTH_POLL_INTERVAL_MS = 2000;
@@ -277,8 +274,6 @@ export function McpConnectionsScreen() {
   const [issuerReviewPreview, setIssuerReviewPreview] = useState<McpIssuerReview | null>(null);
   const [googleDialogMode, setGoogleDialogMode] = useState<"create" | "legacy" | null>(null);
   const [microsoftDialogOpen, setMicrosoftDialogOpen] = useState(false);
-  const [telegramDialogOpen, setTelegramDialogOpen] = useState(false);
-  const telegramConnection = useTelegramConnection(true);
   const showStagingBanner = orgContext ? shouldShowMcpConnectionsStagingBanner(orgContext.capabilities) : false;
   const [pollingConnectionId, setPollingConnectionId] = useState<string | null>(null);
   const [oauthClientConfigurationRequiredIds, setOAuthClientConfigurationRequiredIds] = useState<string[]>([]);
@@ -303,10 +298,6 @@ export function McpConnectionsScreen() {
     }
     if (id === MICROSOFT_365_QUICK_ADD_ID) {
       setMicrosoftDialogOpen(true);
-      return;
-    }
-    if (id === TELEGRAM_QUICK_ADD_ID) {
-      setTelegramDialogOpen(true);
       return;
     }
 
@@ -391,7 +382,6 @@ export function McpConnectionsScreen() {
     if (!quickAddId || handledQuickAddId.current === quickAddId) return;
     const isKnownTarget = quickAddId === GOOGLE_WORKSPACE_QUICK_ADD_ID
       || quickAddId === MICROSOFT_365_QUICK_ADD_ID
-      || quickAddId === TELEGRAM_QUICK_ADD_ID
       || presets.some((preset) => preset.presetId === quickAddId);
     if (!isKnownTarget) return;
     handledQuickAddId.current = quickAddId;
@@ -785,7 +775,6 @@ export function McpConnectionsScreen() {
           <ConnectorQuickAddGrid
             connections={connections}
             presets={presets}
-            telegramConnected={Boolean(telegramConnection.data)}
             onSelect={openQuickAdd}
             filter={smartBarResolutionMode ? "" : smartQuery}
             onManage={manageConnection}
@@ -932,8 +921,6 @@ export function McpConnectionsScreen() {
           setMicrosoftDialogOpen(false);
         }}
       />
-
-      <TelegramDialog open={telegramDialogOpen} onClose={() => setTelegramDialogOpen(false)} />
     </DashboardPageTemplate>
   );
 }
