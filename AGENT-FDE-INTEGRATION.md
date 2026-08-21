@@ -139,3 +139,44 @@ eventually lives). None of that was needed for this lane's task.
   at a resolution mechanism.
 - No end-to-end OpenWork app run (dev server, Electron shell) was performed;
   only `pnpm install` and `pnpm typecheck` were run.
+
+## Starting the app with Agent-FDE mounted
+
+```bash
+pnpm dev:agent-fde              # workspace "gui-ws"
+pnpm dev:agent-fde my-ws        # any other name
+pnpm dev:agent-fde my-ws --no-launch   # provision only, don't start the app
+```
+
+`scripts/dev-agent-fde.mjs` resolves the workspace under
+`../openwork-workspaces` (override with `--workspaces-root DIR` or
+`OPENWORK_WORKSPACES_ROOT`), provisions it, registers it as the selected
+workspace in the dev desktop profile, and then runs `pnpm dev`. Every step is
+idempotent, so re-running it on a live workspace only re-selects it.
+
+The provisioning is four things that are easy to get individually right and
+still end up with a connection that answers nothing:
+
+1. `agent-fde init` — create-or-upgrade, safe on an existing workspace.
+2. On a workspace with no live authority grant, `stakeholder create` +
+   `stakeholder bootstrap`. **A credential bound to a stakeholder no grant
+   covers is refused at issue time**, so this has to come first.
+3. `agent-fde mcp issue-credential`, with the token stored in OpenWork's
+   user-level env store (`~/.config/openwork/env.json`) under the
+   workspace-keyed name `MCP_SERVE_TOKEN__<12 hex>` that
+   `agent-fde-serve-token.ts` looks up first. The store is user-level and the
+   credential is per-workspace, which is why the slot is keyed — an unkeyed
+   name means one provisioned workspace at a time.
+4. The `agent-fde` entry in the workspace's `opencode.jsonc`, carrying both
+   `MCP_LAUNCH_WORKSPACE` and `MCP_SERVE_TOKEN` in `environment`.
+
+Step 3 is the one worth knowing about. With only `MCP_LAUNCH_WORKSPACE` set
+the server starts, `initialize` succeeds and all the view tools list — and
+every `tools/call` is refused with `no credential resolved a principal for
+this call`. Nothing the host shows you distinguishes that from healthy.
+`serve`/`launch` will not mint a credential for themselves, by design: a
+server that could grant itself authority would have no authority boundary.
+
+`--reissue-token` mints a fresh credential for a workspace that already has
+one stored (the old one stays valid; only its SHA-256 was ever kept, so a lost
+token cannot be recovered, only replaced).
