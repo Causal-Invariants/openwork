@@ -293,4 +293,33 @@ export const BUILT_IN_OPENWORK_EXTENSION_MANIFESTS: OpenWorkExtensionManifest[] 
     ],
     lifecycle: { reload: ["config"], detection: ["provider:ollama"] },
   },
+  {
+    schemaVersion: 1,
+    id: "agent-fde",
+    name: "Agent-FDE",
+    description: "Local Agent-FDE MCP server, exposing the workspace's API surface as MCP tools over stdio.",
+    source: { format: "openwork-builtin", origin: "builtin", trusted: true },
+    composer: { prompt: "Use Agent-FDE to " },
+    setup: {
+      instructions: "Agent-FDE must be installed and on PATH. OpenWork launches it as a local MCP server against the current workspace; no additional configuration is required.",
+    },
+    resources: [
+      {
+        type: "mcp",
+        id: "agent-fde-mcp",
+        label: "Agent-FDE MCP",
+        description: "Spawned locally over stdio: agent-fde mcp launch",
+        mcpServerName: "agent-fde",
+        command: ["agent-fde", "mcp", "launch"],
+        required: true,
+      },
+    ],
+    contributions: [
+      { type: "composer-prompt", prompt: "Use Agent-FDE to ", location: "composer" },
+    ],
+    enablement: [
+      { type: "mcp-connected", ref: "agent-fde", label: "MCP server connected" },
+    ],
+    lifecycle: { reload: ["mcp"], detection: ["mcp:agent-fde"] },
+  },
 ];

@@ -7,6 +7,15 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+// Agent-FDE's `/view-*` surface requires a bearer credential
+// (`agent_fde/service/clearance.py`) but its CORS wrapper only allow-lists
+// the `content-type` preflight header, not `authorization` — a credentialed
+// cross-origin request cannot pass a real browser preflight. Proxying it
+// same-origin through Vite's dev server sidesteps CORS/preflight entirely,
+// matching the packaged app's `with_static` same-origin story. Off unless
+// explicitly configured, so a normal `pnpm dev` is unaffected.
+const agentFdeDevTarget = process.env.AGENT_FDE_DEV_TARGET ?? null;
+
 const portValue = Number.parseInt(process.env.PORT ?? "", 10);
 const devPort = Number.isFinite(portValue) && portValue > 0 ? portValue : 5173;
 const allowedHosts = new Set<string>();
@@ -140,10 +149,21 @@ export default defineConfig({
     port: devPort,
     strictPort: true,
     ...(allowedHosts.size > 0 ? { allowedHosts: Array.from(allowedHosts) } : {}),
-    ...(headlessDenTarget
+    ...(headlessDenTarget || agentFdeDevTarget
       ? {
           proxy: {
-            "/api/den": { target: headlessDenTarget, changeOrigin: true },
+            ...(headlessDenTarget
+              ? { "/api/den": { target: headlessDenTarget, changeOrigin: true } }
+              : {}),
+            ...(agentFdeDevTarget
+              ? {
+                  "/agent-fde-api": {
+                    target: agentFdeDevTarget,
+                    changeOrigin: true,
+                    rewrite: (path: string) => path.replace(/^\/agent-fde-api/, ""),
+                  },
+                }
+              : {}),
           },
         }
       : {}),

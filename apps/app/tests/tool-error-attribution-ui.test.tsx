@@ -97,3 +97,64 @@ test("does not render a copy action before a tool has a result", () => {
 
   expect(html).not.toContain('data-testid="tool-result-copy-action"')
 })
+
+const AUTHORITY_REFUSAL_ERROR = JSON.stringify({
+  code: "denied",
+  message: "human actor holds denied for 'raise_risk'; execute is required",
+  retryable: false,
+  details: {
+    action_class: "raise_risk",
+    actor_kind: "human",
+    basis: "no_grant",
+    ceiling_applied: false,
+    required: "execute",
+    resolved: "denied",
+    scope: { kind: "engagement", ref: "01J8Z000000000000000ENGAGE" },
+  },
+})
+
+const CEILING_REFUSAL_ERROR = JSON.stringify({
+  code: "denied",
+  message: "agent actor holds propose_only for 'raise_risk'; execute is required",
+  retryable: false,
+  details: {
+    action_class: "raise_risk",
+    actor_kind: "agent",
+    basis: "direct_grant",
+    ceiling_applied: true,
+    required: "execute",
+    resolved: "propose_only",
+    scope: { kind: "engagement", ref: "01J8Z000000000000000ENGAGE" },
+  },
+})
+
+function refusedToolPart(errorText: string): DynamicToolUIPart {
+  return {
+    type: "dynamic-tool",
+    toolName: "agent-fde_raise-risk",
+    toolCallId: "call-refused",
+    state: "output-error",
+    input: {},
+    errorText,
+  }
+}
+
+test("renders the grant a refused Agent-FDE call is asking for", () => {
+  const html = renderToStaticMarkup(<Tool toolPart={refusedToolPart(AUTHORITY_REFUSAL_ERROR)} defaultOpen />)
+
+  expect(html).toContain("Authority required")
+  expect(html).toContain("Request this grant")
+  expect(html).toContain("agent-fde stakeholder grant")
+  expect(html).toContain("--engagement 01J8Z000000000000000ENGAGE")
+  expect(html).toContain("--action-class raise_risk")
+})
+
+test("tells the reader a grant will not lift a ceiling, and offers no command", () => {
+  const html = renderToStaticMarkup(<Tool toolPart={refusedToolPart(CEILING_REFUSAL_ERROR)} defaultOpen />)
+
+  expect(html).toContain("Authority ceiling")
+  expect(html).toContain("Capped by a policy ceiling")
+  expect(html).toContain("will not lift it")
+  // The whole point: no remedy is offered that cannot work.
+  expect(html).not.toContain("agent-fde stakeholder grant")
+})

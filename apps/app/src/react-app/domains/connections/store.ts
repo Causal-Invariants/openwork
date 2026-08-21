@@ -44,6 +44,7 @@ import { conflictsWithOpenworkConnect } from "./mcp-connection-boundary";
 
 import type { OpenworkServerStore } from "./openwork-server-store";
 import { attemptSilentMcpReauth } from "./mcp-silent-reauth";
+import { AGENT_FDE_SERVE_TOKEN_KEY, readWorkspaceServeToken } from "./agent-fde-serve-token";
 import {
   CLOUD_MCP_SERVER_NAME,
   readCloudMcpUserState,
@@ -404,7 +405,42 @@ export function createConnectionsStore(options: {
     return entry.command;
   };
 
-  const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo) => {
+  // agent-fde refuses every tools/call for which no credential resolves a
+  // principal, and deliberately will not mint one for itself: a server that
+  // could grant itself authority has no authority boundary. So the token is
+  // provisioned out of band -- `agent-fde mcp issue-credential --workspace
+  // ... --stakeholder fde:stakeholder/<ULID>`, which prints it exactly once --
+  // and stored under this key in OpenWork's user env. We only carry it to the
+  // child; we never create one, and we never let a request name its own author.
+  //
+  // The store is user-level (apps/server/src/env-file.ts) while the credential
+  // is issued against one workspace, so the *storage slot* is keyed by
+  // workspace root -- see ./agent-fde-serve-token for the derivation and for
+  // why it is lexical. The name the child is handed stays the plain
+  // AGENT_FDE_SERVE_TOKEN_KEY: that is what `agent-fde mcp launch` reads.
+  const readAgentFdeServeToken = async (workspaceDir: string): Promise<string | null> => {
+    const openworkClient = getOpenworkSnapshot().openworkServerClient;
+    if (!openworkClient) return null;
+    return readWorkspaceServeToken(workspaceDir, async (key) => {
+      const response = await openworkClient.getUserEnv(key);
+      return response.item?.value ?? null;
+    });
+  };
+
+  const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo, workspaceDir?: string | null) => {
+    if (entry.serverName === "agent-fde") {
+      // agent-fde mcp launch reads MCP_LAUNCH_WORKSPACE as its only
+      // workspace source (no cwd fallback — see the Agent-FDE
+      // add-mcp-openwork-launcher change's design.md for why). Set it
+      // here, deterministically, to the workspace root this connect call
+      // is actually opening, rather than leaving agent-fde to infer
+      // anything.
+      if (!workspaceDir) return undefined;
+      const environment: Record<string, string> = { MCP_LAUNCH_WORKSPACE: workspaceDir };
+      const serveToken = await readAgentFdeServeToken(workspaceDir);
+      if (serveToken) environment[AGENT_FDE_SERVE_TOKEN_KEY] = serveToken;
+      return environment;
+    }
     if (entry.serverName !== "openwork-ui") return undefined;
     try {
       const environment = await window.__OPENWORK_ELECTRON__?.invokeDesktop?.("getOpenworkUiMcpEnvironment");
@@ -830,7 +866,7 @@ export function createConnectionsStore(options: {
           throw new Error("Missing MCP command.");
         }
         mcpEntryConfig["command"] = await resolveLocalMcpCommand(entry);
-        const environment = await resolveLocalMcpEnvironment(entry);
+        const environment = await resolveLocalMcpEnvironment(entry, resolvedProjectDir);
         if (environment) {
           mcpEntryConfig["environment"] = environment;
         }
@@ -907,6 +943,19 @@ export function createConnectionsStore(options: {
                 type: "local" as const,
                 command: (mcpEntryConfig["command"] as string[]) ?? entry.command!,
                 enabled: true,
+                // mcpEntryConfig["environment"] is set above (see
+                // resolveLocalMcpEnvironment) for entries like agent-fde that
+                // need a deterministic env var to resolve their workspace.
+                // It was already written into the project's opencode.json,
+                // but this hot-add call is what actually spawns the process
+                // on first connect -- omitting it here left MCP_LAUNCH_WORKSPACE
+                // unset for the live spawn, so agent-fde refused immediately
+                // with "Connection closed" even though the on-disk config
+                // was correct. Confirmed by reproducing both call shapes
+                // directly against a running opencode server.
+                ...(mcpEntryConfig["environment"]
+                  ? { environment: mcpEntryConfig["environment"] as Record<string, string> }
+                  : {}),
               };
 
         const status = unwrap(

@@ -11,8 +11,10 @@ import {
   type ChatToolReconnectAction,
   type ChatToolReconnectProgress,
   type ChatToolReconnectResult,
+  authorityRefusalFromChatToolError,
   type ToolErrorAttribution,
 } from "@/components/tools/error-attribution"
+import { AuthorityRefusalNotice } from "@/components/tools/authority-refusal"
 import { useChatToolReconnect } from "@/components/tools/use-chat-tool-reconnect"
 import { getToolActivityLabel, isToolPartInFlight } from "@/lib/tool-activity"
 import { cn } from "@/lib/utils"
@@ -165,6 +167,11 @@ const Tool = ({
     : isError && toolPart.errorText
       ? attributeChatToolError(toolPart.errorText)
       : null
+  // The badge says *that* authority was refused; this says what to do about
+  // it. Derived from the same error text, so the two can never disagree.
+  const authorityRefusal = isError && toolPart.errorText
+    ? authorityRefusalFromChatToolError(toolPart.errorText)
+    : null
   const label = title ?? getToolActivityLabel(toolPart)
   const hasInput = input !== null && input !== undefined
   const hasOutput = "output" in toolPart && toolPart.output !== undefined
@@ -298,6 +305,9 @@ const Tool = ({
                 {formatValue(toolPart.output)}
               </pre>
             )
+          ) : null}
+          {authorityRefusal ? (
+            <AuthorityRefusalNotice refusal={authorityRefusal} />
           ) : null}
           {isError && toolPart.errorText ? (
             <pre className="text-destructive max-h-60 overflow-auto whitespace-pre-wrap wrap-break-word">
