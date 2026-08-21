@@ -40,11 +40,11 @@ import type {
   ReloadTrigger,
 } from "../../../app/types";
 import { isDesktopRuntime, normalizeDirectoryPath, safeStringify } from "../../../app/utils";
-import { AGENT_FDE_SERVE_TOKEN_KEY, workspaceServeTokenKey } from "./agent-fde-serve-token";
 import { conflictsWithOpenworkConnect } from "./mcp-connection-boundary";
 
 import type { OpenworkServerStore } from "./openwork-server-store";
 import { attemptSilentMcpReauth } from "./mcp-silent-reauth";
+import { AGENT_FDE_SERVE_TOKEN_KEY, readWorkspaceServeToken } from "./agent-fde-serve-token";
 import {
   CLOUD_MCP_SERVER_NAME,
   readCloudMcpUserState,
@@ -414,42 +414,17 @@ export function createConnectionsStore(options: {
   // child; we never create one, and we never let a request name its own author.
   //
   // The store is user-level (apps/server/src/env-file.ts) while the credential
-  // is issued against one workspace, so a single slot could hold only one
-  // provisioned workspace at a time: connecting a second overwrote the first
-  // one's token and every call against the first was refused from then on.
-  // The slot is now keyed by workspace -- see ./agent-fde-serve-token, which
-  // also explains why that derivation is a contract with another repository.
-  //
-  // The unkeyed name is still read when no keyed entry exists, so a workspace
-  // provisioned before this change keeps working with no operator action.
-
-  const readUserEnv = async (key: string): Promise<string | null> => {
+  // is issued against one workspace, so the *storage slot* is keyed by
+  // workspace root -- see ./agent-fde-serve-token for the derivation and for
+  // why it is lexical. The name the child is handed stays the plain
+  // AGENT_FDE_SERVE_TOKEN_KEY: that is what `agent-fde mcp launch` reads.
+  const readAgentFdeServeToken = async (workspaceDir: string): Promise<string | null> => {
     const openworkClient = getOpenworkSnapshot().openworkServerClient;
     if (!openworkClient) return null;
-    try {
+    return readWorkspaceServeToken(workspaceDir, async (key) => {
       const response = await openworkClient.getUserEnv(key);
-      const value = response.item?.value?.trim();
-      return value ? value : null;
-    } catch {
-      // Unset is the ordinary case, not a fault: the connection still comes up
-      // and the eight view tools still list. Only calling them is refused, and
-      // that refusal is the designed posture rather than a misconfiguration.
-      return null;
-    }
-  };
-
-  const readAgentFdeServeToken = async (workspaceDir?: string | null): Promise<string | null> => {
-    if (workspaceDir) {
-      const keyed = await workspaceServeTokenKey(workspaceDir);
-      if (keyed) {
-        const token = await readUserEnv(keyed);
-        // Only fall through when this workspace has no slot of its own.
-        // Preferring a keyed entry over the unkeyed one is what stops a second
-        // workspace's token from being handed to the first.
-        if (token) return token;
-      }
-    }
-    return readUserEnv(AGENT_FDE_SERVE_TOKEN_KEY);
+      return response.item?.value ?? null;
+    });
   };
 
   const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo, workspaceDir?: string | null) => {
@@ -462,8 +437,6 @@ export function createConnectionsStore(options: {
       // anything.
       if (!workspaceDir) return undefined;
       const environment: Record<string, string> = { MCP_LAUNCH_WORKSPACE: workspaceDir };
-      // The same workspaceDir that becomes MCP_LAUNCH_WORKSPACE above. The two
-      // must name the same workspace or the credential resolves nothing there.
       const serveToken = await readAgentFdeServeToken(workspaceDir);
       if (serveToken) environment[AGENT_FDE_SERVE_TOKEN_KEY] = serveToken;
       return environment;
