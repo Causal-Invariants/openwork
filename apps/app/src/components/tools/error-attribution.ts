@@ -114,8 +114,73 @@ export function reconnectActionFromChatToolResult(
   return { connectionId, connectionName, label: "Reconnect" }
 }
 
+export type AuthorityRefusal = {
+  actionClass: string
+  scopeKind: string
+  scopeRef: string | null
+  required: string
+  resolved: string
+  actorKind: string | null
+  basis: string | null
+  ceilingApplied: boolean
+}
+
+// Agent-FDE refuses a call it lacks execution authority for with a structured
+// payload rather than a sentence, precisely so that a host can build a "request
+// this grant" affordance without re-parsing prose. The producing contract is
+// `AuthorityDecision.raise_for_denied` in `agent_fde/platform/authority.py`,
+// whose docstring draws the boundary this parser sits on: every field is a
+// function of the caller's own request and standing, and "resolving who to ask
+// is the host's job, not this one's". This is the host doing that job.
+function authorityRefusalFrom(parsed: Record<string, unknown> | null): AuthorityRefusal | null {
+  if (stringValue(parsed, "code") !== "denied") return null
+  const details = isRecord(parsed?.details) ? parsed.details : null
+  if (!details) return null
+
+  // Required, not optional-with-a-fallback. A refusal missing any of these is
+  // some other denial wearing the same code -- the missing-credential refusal
+  // carries only `{ credential }` -- and rendering a grant affordance for it
+  // would tell the operator to ask for something that is not what went wrong.
+  const actionClass = stringValue(details, "action_class")
+  const required = stringValue(details, "required")
+  const resolved = stringValue(details, "resolved")
+  const scope = isRecord(details.scope) ? details.scope : null
+  const scopeKind = stringValue(scope, "kind")
+  if (!actionClass || !required || !resolved || !scopeKind) return null
+
+  return {
+    actionClass,
+    scopeKind,
+    // A global scope legitimately has no reference. Absent is not malformed.
+    scopeRef: stringValue(scope, "ref") ?? null,
+    required,
+    resolved,
+    actorKind: stringValue(details, "actor_kind") ?? null,
+    basis: stringValue(details, "basis") ?? null,
+    // Defaulting to `false` would be the dangerous direction: it would offer a
+    // grant as the remedy for a ceiling that no grant can lift. Only an
+    // explicit `true` claims the ceiling.
+    ceilingApplied: details.ceiling_applied === true,
+  }
+}
+
+export function authorityRefusalFromChatToolError(errorText: string): AuthorityRefusal | null {
+  if (errorText.length > MAX_PARSED_RESULT_LENGTH) return null
+  return authorityRefusalFrom(parseResultRecord(errorText))
+}
+
 export function attributeChatToolError(errorText: string): ToolErrorAttribution | null {
   if (errorText.length > MAX_PARSED_RESULT_LENGTH) return null
+  const refusal = authorityRefusalFromChatToolError(errorText)
+  if (refusal) {
+    return confirmed(
+      refusal.ceilingApplied ? "Authority ceiling" : "Authority required",
+      refusal.ceilingApplied
+        ? "The workspace refused this call because a policy ceiling caps what this actor kind may do. A grant alone will not lift it."
+        : "The workspace refused this call for want of an authority grant covering the action at this scope.",
+    )
+  }
+
   const diagnostic = diagnosticFromError(errorText)
   const code = stringValue(diagnostic, "code")
   const category = stringValue(diagnostic, "category")
