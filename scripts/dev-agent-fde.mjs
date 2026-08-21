@@ -37,7 +37,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,10 +129,22 @@ function configHome() {
   return process.env.XDG_CONFIG_HOME?.trim() || path.join(homedir(), ".config");
 }
 
+/**
+ * The env store *the dev app actually reads*.
+ *
+ * `pnpm dev` runs the desktop shell in dev mode, and dev mode gives every
+ * child a sandboxed HOME and XDG_CONFIG_HOME under the profile directory
+ * (`ensureDevModePaths` in apps/desktop/electron/runtime.mjs). The store is
+ * resolved from that child env, so it lands under the profile -- *not* under
+ * the real ~/.config/openwork, which the dev app never looks at. Writing the
+ * token to the user-level path instead is invisible in exactly the way the
+ * whole credential step already fails: the server connects, the tools list,
+ * and every call is refused.
+ */
 function envStorePath() {
   const override = process.env.OPENWORK_ENV_STORE?.trim();
   if (override) return path.resolve(override);
-  return path.join(configHome(), "openwork", "env.json");
+  return path.join(desktopProfileDir(), "openwork-dev-data", "xdg", "config", "openwork", "env.json");
 }
 
 function desktopProfileDir() {
@@ -314,6 +326,34 @@ function readStoredToken(key) {
   return store?.variables?.find((record) => record?.key === key)?.value ?? null;
 }
 
+
+/**
+ * Electron aborts rather than run unsandboxed when its SUID helper is not
+ * root-owned mode 4755, which is the state a plain `pnpm install` leaves it
+ * in on Linux. The fix needs root, so this warns with the exact command
+ * instead of quietly setting ELECTRON_DISABLE_SANDBOX -- turning the browser
+ * sandbox off is a real decision and not one a convenience script should
+ * make for you.
+ */
+function warnIfElectronSandboxUnusable() {
+  if (process.platform !== "linux") return;
+  const found = run("sh", ["-c",
+    "ls -d node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox 2>/dev/null | head -1",
+  ], { allowFailure: true }).stdout.trim();
+  if (!found) return;
+  const helper = path.join(REPO_ROOT, found);
+  let stats;
+  try {
+    stats = statSync(helper);
+  } catch {
+    return;
+  }
+  if (stats.uid === 0 && (stats.mode & 0o4000) !== 0) return;
+  console.warn("dev:agent-fde: Electron's sandbox helper is not setuid root, so the app will abort on start. Fix it once with:");
+  console.warn(`  sudo chown root:root ${helper} && sudo chmod 4755 ${helper}`);
+  console.warn("dev:agent-fde: or start this command with ELECTRON_DISABLE_SANDBOX=1 to run without the browser sandbox.");
+}
+
 const options = parseArgs(process.argv.slice(2));
 const name = options.name || process.env.OPENWORK_AGENT_FDE_WORKSPACE?.trim() || "gui-ws";
 if (name.includes("/") || name.includes("..")) fail(`workspace name ${name} must be a single directory name`);
@@ -335,6 +375,7 @@ if (!options.launch) {
   console.log("dev:agent-fde: --no-launch, so not starting the app");
   process.exit(0);
 }
+warnIfElectronSandboxUnusable();
 console.log("dev:agent-fde: starting the desktop app (pnpm dev)");
 const child = spawn("pnpm", ["dev"], { cwd: REPO_ROOT, stdio: "inherit", env: process.env });
 child.on("exit", (code, signal) => process.exit(signal ? 1 : (code ?? 0)));

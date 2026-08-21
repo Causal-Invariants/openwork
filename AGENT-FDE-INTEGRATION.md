@@ -162,11 +162,18 @@ still end up with a connection that answers nothing:
    `stakeholder bootstrap`. **A credential bound to a stakeholder no grant
    covers is refused at issue time**, so this has to come first.
 3. `agent-fde mcp issue-credential`, with the token stored in OpenWork's
-   user-level env store (`~/.config/openwork/env.json`) under the
-   workspace-keyed name `MCP_SERVE_TOKEN__<12 hex>` that
-   `agent-fde-serve-token.ts` looks up first. The store is user-level and the
-   credential is per-workspace, which is why the slot is keyed — an unkeyed
-   name means one provisioned workspace at a time.
+   user-level env store under the workspace-keyed name
+   `MCP_SERVE_TOKEN__<12 hex>` that `agent-fde-serve-token.ts` looks up
+   first. The store is user-level and the credential is per-workspace, which
+   is why the slot is keyed — an unkeyed name means one provisioned
+   workspace at a time.
+
+   In dev mode that store is **not** `~/.config/openwork/env.json`. The
+   desktop shell gives its children a sandboxed `HOME`/`XDG_CONFIG_HOME`
+   under the profile directory (`ensureDevModePaths` in
+   `apps/desktop/electron/runtime.mjs`), so the store the running dev app
+   reads is `<profile>/openwork-dev-data/xdg/config/openwork/env.json`.
+   Override it with `OPENWORK_ENV_STORE`.
 4. The `agent-fde` entry in the workspace's `opencode.jsonc`, carrying both
    `MCP_LAUNCH_WORKSPACE` and `MCP_SERVE_TOKEN` in `environment`.
 
