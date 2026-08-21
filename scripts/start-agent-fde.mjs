@@ -43,6 +43,9 @@
  *   --reissue-token     mint a fresh serve credential
  *   --skip-build        prod only: launch without rebuilding the desktop
  *                       bundle (only safe if a previous build is current)
+ *   --require-sandbox   refuse to launch if Electron's SUID sandbox helper
+ *                       is unusable, instead of falling back to
+ *                       ELECTRON_DISABLE_SANDBOX=1
  *   --no-launch         provision only
  *
  * Env knobs:
@@ -84,7 +87,7 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const options = { name: "", mode: "", workspacesRoot: "", reissue: false, launch: true, build: true };
+  const options = { name: "", mode: "", workspacesRoot: "", reissue: false, launch: true, build: true, requireSandbox: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--mode") {
@@ -92,6 +95,8 @@ function parseArgs(argv) {
       index += 1;
     } else if (argument === "--dev" || argument === "--prod") {
       options.mode = argument.slice(2);
+    } else if (argument === "--require-sandbox") {
+      options.requireSandbox = true;
     } else if (argument === "--skip-build") {
       options.build = false;
     } else if (argument === "--workspaces-root") {
@@ -372,28 +377,39 @@ function readStoredToken(key) {
 /**
  * Electron aborts rather than run unsandboxed when its SUID helper is not
  * root-owned mode 4755, which is the state a plain `pnpm install` leaves it
- * in on Linux. The fix needs root, so this warns with the exact command
- * instead of quietly setting ELECTRON_DISABLE_SANDBOX -- turning the browser
- * sandbox off is a real decision and not one a convenience script should
- * make for you.
+ * in on Linux -- and reinstalling Electron puts it back, so this is not a
+ * one-time papercut.
+ *
+ * This used to warn and launch anyway, which was worse than useless: the
+ * advice scrolled past and the app died three minutes later inside a build
+ * whose output buried it. Fall back to ELECTRON_DISABLE_SANDBOX instead, say
+ * so plainly, and print the root fix that makes the fallback unnecessary.
+ * `--require-sandbox` refuses to launch without it, which is the right
+ * setting if you are exercising anything that depends on renderer isolation.
  */
-function warnIfElectronSandboxUnusable() {
-  if (process.platform !== "linux") return;
+function resolveElectronSandbox(env, { requireSandbox }) {
+  if (process.platform !== "linux") return env;
+  if (env.ELECTRON_DISABLE_SANDBOX) return env;
   const found = run("sh", ["-c",
     "ls -d node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox 2>/dev/null | head -1",
   ], { allowFailure: true }).stdout.trim();
-  if (!found) return;
+  if (!found) return env;
   const helper = path.join(REPO_ROOT, found);
   let stats;
   try {
     stats = statSync(helper);
   } catch {
-    return;
+    return env;
   }
-  if (stats.uid === 0 && (stats.mode & 0o4000) !== 0) return;
-  console.warn(`${LABEL}: Electron's sandbox helper is not setuid root, so the app will abort on start. Fix it once with:`);
+  if (stats.uid === 0 && (stats.mode & 0o4000) !== 0) return env;
+
+  console.warn(`${LABEL}: Electron's SUID sandbox helper is not root-owned mode 4755. Restore the sandbox with:`);
   console.warn(`  sudo chown root:root ${helper} && sudo chmod 4755 ${helper}`);
-  console.warn(`${LABEL}: or start this command with ELECTRON_DISABLE_SANDBOX=1 to run without the browser sandbox.`);
+  if (requireSandbox) {
+    fail("--require-sandbox was passed and the helper is unusable, so not launching");
+  }
+  console.warn(`${LABEL}: launching with ELECTRON_DISABLE_SANDBOX=1 for now (pass --require-sandbox to refuse instead).`);
+  return { ...env, ELECTRON_DISABLE_SANDBOX: "1" };
 }
 
 const options = parseArgs(process.argv.slice(2));
@@ -421,7 +437,6 @@ if (!options.launch) {
   say("--no-launch, so not starting the app");
   process.exit(0);
 }
-warnIfElectronSandboxUnusable();
 
 /**
  * Prod mode runs the same Electron entrypoint the packaged app runs, against
@@ -448,6 +463,7 @@ if (MODE === "prod" && options.build) {
 }
 
 const launch = launchArgs();
+const launchEnv = resolveElectronSandbox(launch.env, { requireSandbox: options.requireSandbox });
 say(`starting the desktop app (pnpm ${launch.args.join(" ")})`);
-const child = spawn("pnpm", launch.args, { cwd: REPO_ROOT, stdio: "inherit", env: launch.env });
+const child = spawn("pnpm", launch.args, { cwd: REPO_ROOT, stdio: "inherit", env: launchEnv });
 child.on("exit", (code, signal) => process.exit(signal ? 1 : (code ?? 0)));
