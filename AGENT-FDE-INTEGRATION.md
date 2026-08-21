@@ -143,16 +143,41 @@ eventually lives). None of that was needed for this lane's task.
 ## Starting the app with Agent-FDE mounted
 
 ```bash
-pnpm dev:agent-fde              # workspace "gui-ws"
+pnpm dev:agent-fde              # dev mode, workspace "gui-ws"
+pnpm prod:agent-fde             # prod mode, same workspace
 pnpm dev:agent-fde my-ws        # any other name
 pnpm dev:agent-fde my-ws --no-launch   # provision only, don't start the app
+pnpm prod:agent-fde --skip-build       # prod, reuse the last desktop build
 ```
 
-`scripts/dev-agent-fde.mjs` resolves the workspace under
+`scripts/start-agent-fde.mjs` resolves the workspace under
 `../openwork-workspaces` (override with `--workspaces-root DIR` or
 `OPENWORK_WORKSPACES_ROOT`), provisions it, registers it as the selected
-workspace in the dev desktop profile, and then runs `pnpm dev`. Every step is
-idempotent, so re-running it on a live workspace only re-selects it.
+workspace in the desktop profile **for the chosen mode**, and then starts the
+app. Every step is idempotent, so re-running it on a live workspace only
+re-selects it.
+
+### Dev and prod are separate profiles, not a build flag
+
+`OPENWORK_DEV_MODE=1` is a single switch with two consequences, and both of
+them move where a provisioned token has to be written:
+
+| | dev | prod |
+|---|---|---|
+| desktop profile | `~/.config/com.differentai.openwork.dev` | `~/.config/com.differentai.openwork` |
+| env store | `<profile>/openwork-dev-data/xdg/config/openwork/env.json` | `~/.config/openwork/env.json` |
+| launch | `pnpm dev` (Vite + Electron) | `build:electron`, then Electron with dev mode unset |
+
+So a workspace provisioned for dev is **not** provisioned for prod: same
+workspace directory, same `opencode.jsonc`, different registry and a token
+in a store the other mode never reads. Run the script once per mode you
+intend to use. Prod rebuilds the desktop bundle by default because launching
+against a stale one is the same failure with a less obvious cause;
+`--skip-build` opts out when you know the build is current.
+
+`--mode dev|prod` (or `OPENWORK_AGENT_FDE_MODE`) selects the mode when
+invoking `scripts/start-agent-fde.mjs` directly; the two `pnpm` scripts are
+thin wrappers that pass it.
 
 The provisioning is four things that are easy to get individually right and
 still end up with a connection that answers nothing:
@@ -168,7 +193,8 @@ still end up with a connection that answers nothing:
    is why the slot is keyed — an unkeyed name means one provisioned
    workspace at a time.
 
-   In dev mode that store is **not** `~/.config/openwork/env.json`. The
+   In dev mode that store is **not** `~/.config/openwork/env.json` (in prod
+   it is). The
    desktop shell gives its children a sandboxed `HOME`/`XDG_CONFIG_HOME`
    under the profile directory (`ensureDevModePaths` in
    `apps/desktop/electron/runtime.mjs`), so the store the running dev app

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Start the OpenWork desktop app in dev mode with an Agent-FDE workspace
- * already mounted, provisioned, and selected.
+ * Start the OpenWork desktop app -- in dev or prod mode -- with an Agent-FDE
+ * workspace already mounted, provisioned, and selected.
  *
  * Why this script exists: connecting Agent-FDE by hand is four separate
  * steps in three different places, and getting any one of them wrong fails
@@ -12,23 +12,41 @@
  * has to be issued out of band and handed back through OpenWork's user-level
  * env store. See spikes/openwork-ui/BRINGUP.md in the Agent-FDE repo.
  *
+ * The two modes are not cosmetic. `OPENWORK_DEV_MODE=1` is the single switch
+ * that decides both the desktop profile directory and where the app reads its
+ * env store from, so a token provisioned for one mode is invisible to the
+ * other. Everything mode-dependent is resolved through `MODE_PROFILE` below
+ * rather than spread through the steps.
+ *
  * What it does, all idempotent:
  *   1. Resolves the workspace under the workspaces base directory
  *      (default: ../openwork-workspaces relative to this repo).
  *   2. `agent-fde init`s it, and on a fresh workspace mints the genesis
  *      authority grant (`stakeholder create` + `stakeholder bootstrap`).
- *   3. Issues an `MCP_SERVE_TOKEN` credential and stores it in OpenWork's
- *      user env store (~/.config/openwork/env.json) under the
- *      workspace-keyed name the app looks up first.
- *   4. Registers the workspace in the desktop workspace store and selects it.
+ *   3. Issues an `MCP_SERVE_TOKEN` credential and stores it in the env store
+ *      *for the selected mode*, under the workspace-keyed name the app looks
+ *      up first.
+ *   4. Registers the workspace in that mode's desktop workspace store and
+ *      selects it.
  *   5. Writes the `agent-fde` MCP entry into the workspace's opencode.jsonc.
- *   6. Runs `pnpm dev`.
+ *   6. Starts the app: `pnpm dev` in dev mode; a desktop build followed by a
+ *      non-dev Electron run in prod mode.
  *
  * Usage:
- *   pnpm dev:agent-fde [workspace-name] [--workspaces-root DIR]
- *                      [--reissue-token] [--no-launch]
+ *   pnpm dev:agent-fde  [workspace-name] [options]   # dev mode
+ *   pnpm prod:agent-fde [workspace-name] [options]   # prod mode
+ *   node scripts/start-agent-fde.mjs [name] --mode dev|prod [options]
+ *
+ * Options:
+ *   --mode dev|prod     which profile to provision and launch (default: dev)
+ *   --workspaces-root DIR
+ *   --reissue-token     mint a fresh serve credential
+ *   --skip-build        prod only: launch without rebuilding the desktop
+ *                       bundle (only safe if a previous build is current)
+ *   --no-launch         provision only
  *
  * Env knobs:
+ *   OPENWORK_AGENT_FDE_MODE    default mode when --mode is absent
  *   OPENWORK_WORKSPACES_ROOT   base dir for workspaces
  *   OPENWORK_AGENT_FDE_WORKSPACE  default workspace name
  *   AGENT_FDE_BIN              agent-fde binary (default: agent-fde on PATH)
@@ -47,19 +65,36 @@ const AGENT_FDE = process.env.AGENT_FDE_BIN?.trim() || "agent-fde";
 const SERVE_TOKEN_KEY = "MCP_SERVE_TOKEN";
 /** Matches apps/app/src/react-app/domains/connections/agent-fde-serve-token.ts. */
 const WORKSPACE_KEY_DIGEST_LENGTH = 12;
+/** Matches DESKTOP_DISTRIBUTION.appIdentifier in apps/desktop/electron/main.mjs. */
+const APP_IDENTIFIER = "com.differentai.openwork";
 /** The dev build runs under its own identifier so it can sit beside a release. */
-const DEV_APP_IDENTIFIER = "com.differentai.openwork.dev";
+const DEV_APP_IDENTIFIER = `${APP_IDENTIFIER}.dev`;
+const MODES = ["dev", "prod"];
+
+/** Set once the mode is known; only `fail` before that can print the bare form. */
+let LABEL = "agent-fde";
+
+function say(message) {
+  console.log(`${LABEL}: ${message}`);
+}
 
 function fail(message) {
-  console.error(`dev:agent-fde: ${message}`);
+  console.error(`${LABEL}: ${message}`);
   process.exit(1);
 }
 
 function parseArgs(argv) {
-  const options = { name: "", workspacesRoot: "", reissue: false, launch: true };
+  const options = { name: "", mode: "", workspacesRoot: "", reissue: false, launch: true, build: true };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === "--workspaces-root") {
+    if (argument === "--mode") {
+      options.mode = argv[index + 1] ?? "";
+      index += 1;
+    } else if (argument === "--dev" || argument === "--prod") {
+      options.mode = argument.slice(2);
+    } else if (argument === "--skip-build") {
+      options.build = false;
+    } else if (argument === "--workspaces-root") {
       options.workspacesRoot = argv[index + 1] ?? "";
       index += 1;
     } else if (argument === "--reissue-token") {
@@ -130,7 +165,7 @@ function configHome() {
 }
 
 /**
- * The env store *the dev app actually reads*.
+ * The env store *the app actually reads*, which differs by mode.
  *
  * `pnpm dev` runs the desktop shell in dev mode, and dev mode gives every
  * child a sandboxed HOME and XDG_CONFIG_HOME under the profile directory
@@ -139,18 +174,25 @@ function configHome() {
  * the real ~/.config/openwork, which the dev app never looks at. Writing the
  * token to the user-level path instead is invisible in exactly the way the
  * whole credential step already fails: the server connects, the tools list,
- * and every call is refused.
+ * and every call is refused. Prod mode has no such sandbox and reads the
+ * real user-level store.
  */
 function envStorePath() {
   const override = process.env.OPENWORK_ENV_STORE?.trim();
   if (override) return path.resolve(override);
-  return path.join(desktopProfileDir(), "openwork-dev-data", "xdg", "config", "openwork", "env.json");
+  if (MODE === "dev") {
+    return path.join(desktopProfileDir(), "openwork-dev-data", "xdg", "config", "openwork", "env.json");
+  }
+  // Prod inherits the real environment, so the store is where
+  // `openworkEnvStorePath` in packages/paths resolves it for any other
+  // OpenWork process.
+  return path.join(configHome(), "openwork", "env.json");
 }
 
 function desktopProfileDir() {
   const override = process.env.OPENWORK_ELECTRON_USERDATA?.trim();
   if (override) return path.resolve(override);
-  return path.join(configHome(), DEV_APP_IDENTIFIER);
+  return path.join(configHome(), MODE === "dev" ? DEV_APP_IDENTIFIER : APP_IDENTIFIER);
 }
 
 /** Mirrors `stableWorkspaceId` in apps/desktop/electron/workspace-store.mjs. */
@@ -277,7 +319,7 @@ function registerWorkspace(workspace, name) {
   // which of two "gui-ws" rows is the one this run provisioned.
   for (const candidate of workspaces) {
     if (candidate?.name === name && candidate?.path !== workspace) {
-      console.warn(`dev:agent-fde: note: another workspace is also named ${name} (${candidate.path})`);
+      console.warn(`${LABEL}: note: another workspace is also named ${name} (${candidate.path})`);
     }
   }
   const existingIndex = workspaces.findIndex((candidate) => candidate?.id === id);
@@ -308,7 +350,7 @@ function writeWorkspaceMcpConfig(workspace, token) {
   const configPath = path.join(workspace, "opencode.jsonc");
   const config = readJson(configPath, { $schema: "https://opencode.ai/config.json" });
   if (config === null) {
-    console.warn(`dev:agent-fde: skipped ${configPath} (not plain JSON; leaving it untouched)`);
+    console.warn(`${LABEL}: skipped ${configPath} (not plain JSON; leaving it untouched)`);
     return null;
   }
   const environment = { MCP_LAUNCH_WORKSPACE: workspace };
@@ -349,12 +391,16 @@ function warnIfElectronSandboxUnusable() {
     return;
   }
   if (stats.uid === 0 && (stats.mode & 0o4000) !== 0) return;
-  console.warn("dev:agent-fde: Electron's sandbox helper is not setuid root, so the app will abort on start. Fix it once with:");
+  console.warn(`${LABEL}: Electron's sandbox helper is not setuid root, so the app will abort on start. Fix it once with:`);
   console.warn(`  sudo chown root:root ${helper} && sudo chmod 4755 ${helper}`);
-  console.warn("dev:agent-fde: or start this command with ELECTRON_DISABLE_SANDBOX=1 to run without the browser sandbox.");
+  console.warn(`${LABEL}: or start this command with ELECTRON_DISABLE_SANDBOX=1 to run without the browser sandbox.`);
 }
 
 const options = parseArgs(process.argv.slice(2));
+const MODE = (options.mode || process.env.OPENWORK_AGENT_FDE_MODE?.trim() || "dev").toLowerCase();
+if (!MODES.includes(MODE)) fail(`--mode must be one of ${MODES.join(", ")}, got ${MODE}`);
+LABEL = `${MODE}:agent-fde`;
+
 const name = options.name || process.env.OPENWORK_AGENT_FDE_WORKSPACE?.trim() || "gui-ws";
 if (name.includes("/") || name.includes("..")) fail(`workspace name ${name} must be a single directory name`);
 const workspacesRoot = path.resolve(
@@ -362,20 +408,46 @@ const workspacesRoot = path.resolve(
 );
 const workspace = path.join(workspacesRoot, name);
 
-console.log(`dev:agent-fde: workspace ${workspace}`);
+say(`${MODE} mode, workspace ${workspace}`);
 ensureWorkspace(workspace);
 const serveToken = ensureServeToken(workspace, { reissue: options.reissue });
-console.log(`dev:agent-fde: serve token ${serveToken.reused ? "reused" : "issued"} as ${serveToken.key} in ${serveToken.storePath}`);
+say(`serve token ${serveToken.reused ? "reused" : "issued"} as ${serveToken.key} in ${serveToken.storePath}`);
 const registered = registerWorkspace(workspace, name);
-console.log(`dev:agent-fde: registered and selected ${registered.id} in ${registered.storePath}`);
+say(`registered and selected ${registered.id} in ${registered.storePath}`);
 const configPath = writeWorkspaceMcpConfig(workspace, readStoredToken(serveToken.key));
-if (configPath) console.log(`dev:agent-fde: wrote the agent-fde MCP entry to ${configPath}`);
+if (configPath) say(`wrote the agent-fde MCP entry to ${configPath}`);
 
 if (!options.launch) {
-  console.log("dev:agent-fde: --no-launch, so not starting the app");
+  say("--no-launch, so not starting the app");
   process.exit(0);
 }
 warnIfElectronSandboxUnusable();
-console.log("dev:agent-fde: starting the desktop app (pnpm dev)");
-const child = spawn("pnpm", ["dev"], { cwd: REPO_ROOT, stdio: "inherit", env: process.env });
+
+/**
+ * Prod mode runs the same Electron entrypoint the packaged app runs, against
+ * a built UI and server bundle, with OPENWORK_DEV_MODE *deleted* rather than
+ * merely unset in the parent -- inheriting it from an outer shell would send
+ * the app to the dev profile this run did not provision.
+ */
+function launchArgs() {
+  if (MODE === "dev") return { args: ["dev"], env: process.env };
+  const env = { ...process.env };
+  delete env.OPENWORK_DEV_MODE;
+  return { args: ["--filter", "@openwork/desktop", "electron"], env };
+}
+
+if (MODE === "prod" && options.build) {
+  say("building the desktop bundle (pnpm --filter @openwork/desktop build:electron)");
+  const build = spawnSync("pnpm", ["--filter", "@openwork/desktop", "build:electron"], {
+    cwd: REPO_ROOT,
+    stdio: "inherit",
+  });
+  if (build.status !== 0) fail(`desktop build exited ${build.status ?? "on a signal"}`);
+} else if (MODE === "prod") {
+  say("--skip-build, so launching against whatever the last build left behind");
+}
+
+const launch = launchArgs();
+say(`starting the desktop app (pnpm ${launch.args.join(" ")})`);
+const child = spawn("pnpm", launch.args, { cwd: REPO_ROOT, stdio: "inherit", env: launch.env });
 child.on("exit", (code, signal) => process.exit(signal ? 1 : (code ?? 0)));
