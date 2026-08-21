@@ -44,6 +44,7 @@ import { conflictsWithOpenworkConnect } from "./mcp-connection-boundary";
 
 import type { OpenworkServerStore } from "./openwork-server-store";
 import { attemptSilentMcpReauth } from "./mcp-silent-reauth";
+import { AGENT_FDE_SERVE_TOKEN_KEY, readWorkspaceServeToken } from "./agent-fde-serve-token";
 import {
   CLOUD_MCP_SERVER_NAME,
   readCloudMcpUserState,
@@ -413,25 +414,17 @@ export function createConnectionsStore(options: {
   // child; we never create one, and we never let a request name its own author.
   //
   // The store is user-level (apps/server/src/env-file.ts) while the credential
-  // is issued against one workspace. A token presented to a workspace it was
-  // not issued for does not resolve there and the call is refused, which is
-  // the safe direction to fail; but it does mean one provisioned workspace at
-  // a time until there is somewhere per-workspace to keep this.
-  const AGENT_FDE_SERVE_TOKEN_KEY = "MCP_SERVE_TOKEN";
-
-  const readAgentFdeServeToken = async (): Promise<string | null> => {
+  // is issued against one workspace, so the *storage slot* is keyed by
+  // workspace root -- see ./agent-fde-serve-token for the derivation and for
+  // why it is lexical. The name the child is handed stays the plain
+  // AGENT_FDE_SERVE_TOKEN_KEY: that is what `agent-fde mcp launch` reads.
+  const readAgentFdeServeToken = async (workspaceDir: string): Promise<string | null> => {
     const openworkClient = getOpenworkSnapshot().openworkServerClient;
     if (!openworkClient) return null;
-    try {
-      const response = await openworkClient.getUserEnv(AGENT_FDE_SERVE_TOKEN_KEY);
-      const value = response.item?.value?.trim();
-      return value ? value : null;
-    } catch {
-      // Unset is the ordinary case, not a fault: the connection still comes up
-      // and the eight view tools still list. Only calling them is refused, and
-      // that refusal is the designed posture rather than a misconfiguration.
-      return null;
-    }
+    return readWorkspaceServeToken(workspaceDir, async (key) => {
+      const response = await openworkClient.getUserEnv(key);
+      return response.item?.value ?? null;
+    });
   };
 
   const resolveLocalMcpEnvironment = async (entry: McpDirectoryInfo, workspaceDir?: string | null) => {
@@ -444,7 +437,7 @@ export function createConnectionsStore(options: {
       // anything.
       if (!workspaceDir) return undefined;
       const environment: Record<string, string> = { MCP_LAUNCH_WORKSPACE: workspaceDir };
-      const serveToken = await readAgentFdeServeToken();
+      const serveToken = await readAgentFdeServeToken(workspaceDir);
       if (serveToken) environment[AGENT_FDE_SERVE_TOKEN_KEY] = serveToken;
       return environment;
     }
